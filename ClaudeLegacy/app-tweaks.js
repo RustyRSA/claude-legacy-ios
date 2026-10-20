@@ -6,7 +6,10 @@
 // 2. Voice mode on iOS versions that cannot record Opus: claude.ai's voice session
 //    has an uncompressed recording mode (16 kHz PCM via ScriptProcessor); these
 //    patches switch it on and let the voice button appear.
-// 3. A small debug log, copied from the three-finger long-press menu, including
+// 3. WebSocket addresses: iOS 16 only accepts ws:// and wss://, so https:// and
+//    relative addresses (which newer browsers convert) are converted here; the
+//    voice session needs this.
+// 4. A small debug log, copied from the three-finger long-press menu, including
 //    how the voice and dictation connections went.
 (function () {
   "use strict";
@@ -49,7 +52,7 @@
     return text.length > 500 ? text.slice(0, 500) + "…" : text;
   }
 
-  var NOISE = /^\[(cache hit|cache miss|importModule|exportModule|evaluateJavaScript)\]/;
+  var NOISE = /^(\[(cache hit|cache miss|importModule|exportModule|evaluateJavaScript)\]|Datadog Browser SDK)/;
   var RELEVANT = /voice|audio|record|micro|\bmic\b|getUserMedia|websocket|speech|\bpcm\b|opus|permission|dictation/i;
 
   ["error", "warn", "info", "log", "debug"].forEach(function (level) {
@@ -75,8 +78,13 @@
     record("rejection", reason && reason.message ? reason.message : describe(reason));
   });
 
+  // The app reports every audio-route notification; keep only the changes.
+  var lastNative = "";
   window.__appLogNative = function (text) {
-    record("native", String(text));
+    text = String(text);
+    if (text === lastNative) return;
+    lastNative = text;
+    record("native", text);
   };
 
   window.__appDebugLog = function () {
@@ -143,7 +151,7 @@
   // sent (the "can't be used" style message in voice mode is the server's own).
   // No credentials are logged: the ticket travels in the subprotocol, which is
   // never recorded, and ids in the path are shortened.
-  var VOICE_SOCKET = /\/api\/ws\/(voice|speech_to_text)\//;
+  var VOICE_SOCKET = /\/api\/ws\/(voice|speech_to_text|text_to_speech)\//;
   var LOGGED_PARAMS = ["input_encoding", "input_sample_rate", "output_format", "client_platform",
     "capabilities", "entry_source", "connect_reason"];
   var UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -184,18 +192,48 @@
     });
   }
 
+  // iOS 16's WebSocket accepts only absolute ws:// and wss:// addresses. The
+  // current WebSocket standard (and newer browsers) also take https:// and
+  // relative addresses and convert them, and claude.ai's voice session relies on
+  // that: it dials https://claude.ai/api/ws/voice/..., which Safari 16 rejects
+  // with a SyntaxError before connecting. Convert addresses the same way here.
+  function toSocketURL(raw) {
+    try {
+      var href = new URL(String(raw), location.href).href.replace(/#.*$/, "");
+      if (/^https:/i.test(href)) return href.replace(/^https:/i, "wss:");
+      if (/^http:/i.test(href)) return href.replace(/^http:/i, "ws:");
+      return /^wss?:/i.test(href) ? href : raw;
+    } catch (e) {
+      return raw;
+    }
+  }
+
   if (typeof window.WebSocket === "function" && typeof Proxy === "function") {
     var socketCount = 0;
     window.WebSocket = new Proxy(window.WebSocket, {
       construct: function (Target, args, newTarget) {
-        var ws = Reflect.construct(Target, args, newTarget);
+        var list = Array.prototype.slice.call(args);
+        var original = list.length ? String(list[0]) : "";
+        if (list.length) list[0] = toSocketURL(list[0]);
+        var converted = list.length > 0 && !/^wss?:/i.test(original) && /^wss?:/i.test(String(list[0]));
+        var voice = VOICE_SOCKET.test(original);
+        var label = voice ? "#" + (++socketCount) : "";
+        if (voice) {
+          record("ws", label + " connect " + describeSocketURL(list[0]) +
+            (converted ? " (address converted to " + String(list[0]).split(":")[0] + ")" : ""));
+        }
+        var ws;
         try {
-          if (VOICE_SOCKET.test(String(args[0]))) {
-            var label = "#" + (++socketCount);
-            record("ws", label + " connect " + describeSocketURL(args[0]));
+          ws = Reflect.construct(Target, list, newTarget);
+        } catch (e) {
+          if (voice) record("ws", label + " could not be created: " + describe(e));
+          throw e;
+        }
+        if (voice) {
+          try {
             watchSocket(ws, label);
-          }
-        } catch (e) {}
+          } catch (e) {}
+        }
         return ws;
       }
     });
@@ -348,10 +386,18 @@
         var dark = window.matchMedia("(prefers-color-scheme: dark)");
         if (dark.addEventListener) dark.addEventListener("change", schedule);
       }
-      // Opening the sidebar or a sheet changes the edge colours; re-check once
-      // the animation has settled.
+      // Opening the sidebar or a sheet changes the edge colours. Follow the
+      // animation frame by frame for a moment after each tap, so the strips change
+      // together with the page (reports are only sent when a colour changes).
+      var followUntil = 0;
+      var follow = function () {
+        reportAppearance();
+        if (Date.now() < followUntil) window.requestAnimationFrame(follow);
+      };
       document.addEventListener("touchend", function () {
-        setTimeout(reportAppearance, 400);
+        var running = Date.now() < followUntil;
+        followUntil = Date.now() + 700;
+        if (!running) window.requestAnimationFrame(follow);
       }, { passive: true, capture: true });
     } catch (e) {
       record("app", "observer setup failed: " + describe(e));
