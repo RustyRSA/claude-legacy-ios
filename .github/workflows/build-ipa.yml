@@ -1,0 +1,113 @@
+# Builds ClaudeLegacy.ipa from this repository's own source on a GitHub macOS runner.
+# Runs only when started by hand: Actions -> Build IPA -> Run workflow.
+# Same build flags as the project's build.sh, plus checks that the app contains
+# exactly the JavaScript in this repo and will run on iOS 16.3.
+name: Build IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source (no saved credentials)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: false
+
+      - name: Fetch the pinned Polyfills submodule over HTTPS
+        run: |
+          # .gitmodules points at an SSH URL and the runner has no SSH key.
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --recursive
+          git submodule status
+
+      - name: Select Xcode
+        run: |
+          shopt -s nullglob
+          xcodes=(/Applications/Xcode_16*.app)
+          if (( ${#xcodes[@]} )); then
+            sudo xcode-select -s "$(printf '%s\n' "${xcodes[@]}" | sort -V | tail -n 1)"
+          fi
+          xcodebuild -version
+          xcodebuild -list -project ClaudeLegacy.xcodeproj
+
+      - name: Build unsigned archive
+        run: |
+          xcodebuild archive \
+            -project ClaudeLegacy.xcodeproj \
+            -scheme ClaudeLegacy \
+            -destination "generic/platform=iOS" \
+            -archivePath build/ClaudeLegacy.xcarchive \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: Package IPA
+        run: |
+          APP=build/ClaudeLegacy.xcarchive/Products/Applications/ClaudeLegacy.app
+          test -d "$APP"
+          find "$APP" -name _CodeSignature -type d -prune -exec rm -rf {} +
+          mkdir -p build/output/Payload
+          cp -R "$APP" build/output/Payload/
+          cd build/output
+          zip -qr ClaudeLegacy.ipa Payload
+
+      - name: Verify the app matches this source
+        run: |
+          APP=build/output/Payload/ClaudeLegacy.app
+          # Bundled JavaScript must be byte-identical to the files in this repo.
+          cmp ClaudeLegacy/patch.js "$APP/patch.js"
+          cmp ClaudeLegacy/legacy-transpiler.js "$APP/legacy-transpiler.js"
+          diff -r "Polyfills/layout/Library/Application Support/Polyfills" "$APP/Polyfills"
+          echo "Bundled JavaScript matches the source."
+
+          # The binary's minimum iOS version must be 16.3 or lower to run on 16.3.1.
+          EXE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          lipo -info "$APP/$EXE"
+          vtool -show-build "$APP/$EXE"
+          MINOS=$(vtool -show-build "$APP/$EXE" | awk '$1 == "minos" {print $2; exit}')
+          test -n "$MINOS"
+          if [ "$(printf '%s\n' "$MINOS" 16.3 | sort -V | head -n 1)" != "$MINOS" ]; then
+            echo "::error::Minimum iOS is $MINOS, too new for iOS 16.3.1"
+            exit 1
+          fi
+          echo "MINOS=$MINOS" >> "$GITHUB_ENV"
+
+      - name: Record checksum
+        run: |
+          SHA=$(shasum -a 256 build/output/ClaudeLegacy.ipa | awk '{print $1}')
+          echo "IPA SHA-256: $SHA"
+          {
+            echo "### ClaudeLegacy.ipa"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Source commit | \`$GITHUB_SHA\` |"
+            echo "| Polyfills commit | \`$(git rev-parse HEAD:Polyfills)\` |"
+            echo "| Xcode | $(xcodebuild -version | head -n 1) |"
+            echo "| Minimum iOS | $MINOS |"
+            echo "| SHA-256 | \`$SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: build/output/ClaudeLegacy.ipa
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
