@@ -1,11 +1,13 @@
 // app-tweaks.js — injected at document start, before every other script.
 //
 // 1. App feel: no pinch or double-tap zoom, no long-press link callouts, no grey
-//    tap flash, and the status bar follows the colour Claude draws under it.
+//    tap flash, and the strips above and below the page (plus the status bar
+//    text) follow the colours Claude draws at its top and bottom edges.
 // 2. Voice mode on iOS versions that cannot record Opus: claude.ai's voice session
 //    has an uncompressed recording mode (16 kHz PCM via ScriptProcessor); these
 //    patches switch it on and let the voice button appear.
-// 3. A small debug log, copied from the three-finger long-press menu.
+// 3. A small debug log, copied from the three-finger long-press menu, including
+//    how the voice and dictation connections went.
 (function () {
   "use strict";
   if (window.__appTweaksLoaded) return;
@@ -134,6 +136,93 @@
   };
 
   // ---------------------------------------------------------------------------
+  // Voice connection log
+  // ---------------------------------------------------------------------------
+  // Records what the voice and dictation sockets do: the transport and audio
+  // format requested, how each socket closed, and any error frame the server
+  // sent (the "can't be used" style message in voice mode is the server's own).
+  // No credentials are logged: the ticket travels in the subprotocol, which is
+  // never recorded, and ids in the path are shortened.
+  var VOICE_SOCKET = /\/api\/ws\/(voice|speech_to_text)\//;
+  var LOGGED_PARAMS = ["input_encoding", "input_sample_rate", "output_format", "client_platform",
+    "capabilities", "entry_source", "connect_reason"];
+  var UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+  var ERROR_FRAME = /"(error|error_code|display_message|fatal)"|"type"\s*:\s*"[^"]*(error|fatal|refus|unavailable|reject)/i;
+
+  function describeSocketURL(raw) {
+    try {
+      var url = new URL(String(raw), location.href);
+      var params = [];
+      LOGGED_PARAMS.forEach(function (key) {
+        var value = url.searchParams.get(key);
+        if (value !== null) params.push(key + "=" + value);
+      });
+      return url.pathname.replace(UUID, "…") + (params.length ? " [" + params.join(" ") + "]" : "");
+    } catch (e) {
+      return "(unreadable url)";
+    }
+  }
+
+  function watchSocket(ws, label) {
+    var startedAt = Date.now();
+    var frames = 0;
+    ws.addEventListener("open", function () {
+      record("ws", label + " open after " + (Date.now() - startedAt) + "ms");
+    });
+    ws.addEventListener("error", function () {
+      record("ws", label + " error event");
+    });
+    ws.addEventListener("close", function (event) {
+      record("ws", label + " closed, code " + event.code +
+        (event.reason ? ", reason " + JSON.stringify(String(event.reason).slice(0, 200)) : "") +
+        (event.wasClean ? " (clean)" : ""));
+    });
+    ws.addEventListener("message", function (event) {
+      if (typeof event.data !== "string" || frames >= 20 || !ERROR_FRAME.test(event.data)) return;
+      frames++;
+      record("ws", label + " frame " + event.data.slice(0, 600));
+    });
+  }
+
+  if (typeof window.WebSocket === "function" && typeof Proxy === "function") {
+    var socketCount = 0;
+    window.WebSocket = new Proxy(window.WebSocket, {
+      construct: function (Target, args, newTarget) {
+        var ws = Reflect.construct(Target, args, newTarget);
+        try {
+          if (VOICE_SOCKET.test(String(args[0]))) {
+            var label = "#" + (++socketCount);
+            record("ws", label + " connect " + describeSocketURL(args[0]));
+            watchSocket(ws, label);
+          }
+        } catch (e) {}
+        return ws;
+      }
+    });
+  }
+
+  // Voice mode can also carry audio over WebRTC; log how those connections go.
+  if (typeof window.RTCPeerConnection === "function" && typeof Proxy === "function") {
+    var peerCount = 0;
+    window.RTCPeerConnection = new Proxy(window.RTCPeerConnection, {
+      construct: function (Target, args, newTarget) {
+        var pc = Reflect.construct(Target, args, newTarget);
+        try {
+          var label = "rtc#" + (++peerCount);
+          record("rtc", label + " created");
+          pc.addEventListener("connectionstatechange", function () {
+            record("rtc", label + " connection " + pc.connectionState);
+          });
+          pc.addEventListener("iceconnectionstatechange", function () {
+            record("rtc", label + " ice " + pc.iceConnectionState);
+          });
+        } catch (e) {}
+        return pc;
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // App feel
   // ---------------------------------------------------------------------------
   function lockViewport() {
@@ -201,33 +290,39 @@
     }
   }
 
-  function colourUnderStatusBar() {
-    var el = document.elementFromPoint(Math.round(window.innerWidth / 2), 1);
+  // The first opaque background found at (x, y), walking up from the element there.
+  function colourAt(x, y) {
+    var el = document.elementFromPoint(x, y);
     while (el && el.nodeType === 1) {
       var c = toRGB(getComputedStyle(el).backgroundColor);
-      if (c && c.a > 0.5) return c;
+      if (c && c.a > 0.5) return { r: c.r, g: c.g, b: c.b };
       el = el.parentElement;
     }
     if (!document.body) return null;
     var body = toRGB(getComputedStyle(document.body).backgroundColor);
-    return body && body.a > 0.5 ? body : null;
+    return body && body.a > 0.5 ? { r: body.r, g: body.g, b: body.b } : null;
   }
 
+  // Samples just inside the page's top and bottom edges, near the left side so
+  // centred controls (the message box) do not decide the colour.
   var lastReported = "";
   function reportAppearance() {
     if (!document.body) return;
-    var c = null;
+    var report = null;
     try {
-      c = colourUnderStatusBar();
+      var height = document.documentElement.clientHeight || window.innerHeight;
+      var top = colourAt(4, 1);
+      var bottom = colourAt(4, Math.max(1, height - 2)) || top;
+      if (top) report = { top: top, bottom: bottom };
     } catch (e) {
       return;
     }
-    if (!c) return;
-    var key = c.r + "," + c.g + "," + c.b;
+    if (!report) return;
+    var key = JSON.stringify(report);
     if (key === lastReported) return;
     lastReported = key;
     try {
-      window.webkit.messageHandlers.appearance.postMessage({ r: c.r, g: c.g, b: c.b });
+      window.webkit.messageHandlers.appearance.postMessage(report);
     } catch (e) {}
   }
 
@@ -253,6 +348,11 @@
         var dark = window.matchMedia("(prefers-color-scheme: dark)");
         if (dark.addEventListener) dark.addEventListener("change", schedule);
       }
+      // Opening the sidebar or a sheet changes the edge colours; re-check once
+      // the animation has settled.
+      document.addEventListener("touchend", function () {
+        setTimeout(reportAppearance, 400);
+      }, { passive: true, capture: true });
     } catch (e) {
       record("app", "observer setup failed: " + describe(e));
     }

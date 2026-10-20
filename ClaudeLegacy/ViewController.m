@@ -49,6 +49,11 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 /// Status bar text colour, set from the page's own background (see -handleAppearance:).
 @property (nonatomic, assign) UIStatusBarStyle pageStatusBarStyle;
 
+/// Plain views behind the status bar and the home indicator, painted in the
+/// colours the page draws at its top and bottom edges.
+@property (nonatomic, strong) UIView *topFill;
+@property (nonatomic, strong) UIView *bottomFill;
+
 @property (nonatomic, strong) LoadingOverlayView *loadingOverlay;
 @property (nonatomic, strong) NSTimer *settleTimer;
 @property (nonatomic, strong) NSDate *lastActivity;
@@ -130,11 +135,10 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
     self.view.backgroundColor = AppBackgroundColor();
     self.pageStatusBarStyle = UIStatusBarStyleDefault;
 
-    // Edge to edge, like the native app: claude.ai declares viewport-fit=cover and
-    // pads its own header and message box with env(safe-area-inset-*), so the page
-    // itself fills the status-bar and home-indicator areas.
-    [self pinWebViewToScreenEdges];
-    _webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    // The page stays inside the safe area (claude.ai's mobile web layout does not
+    // pad itself for the status bar), and the strips above and below it are
+    // painted in the page's own edge colours so the screen reads as one surface.
+    [self installEdgeFills];
 
     // No pull-to-refresh and no rubber-banding of the whole page (the chat list
     // still scrolls and bounces inside it). Reload lives in the three-finger menu.
@@ -188,26 +192,32 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-/// Replaces the storyboard's safe-area constraints: top and bottom go to the
-/// screen edges, sides stay inside the safe area (keeps landscape clear of the
-/// Dynamic Island; in portrait the side insets are zero anyway).
-- (void)pinWebViewToScreenEdges {
-    NSMutableArray<NSLayoutConstraint *> *old = [NSMutableArray array];
-    for (NSLayoutConstraint *constraint in self.view.constraints) {
-        if (constraint.firstItem == _webView || constraint.secondItem == _webView) {
-            [old addObject:constraint];
-        }
+/// The web view keeps the storyboard's safe-area constraints. These two views
+/// cover what is left: the status-bar strip and the home-indicator strip.
+- (void)installEdgeFills {
+    UIView *top = [[UIView alloc] init];
+    UIView *bottom = [[UIView alloc] init];
+    for (UIView *fill in @[top, bottom]) {
+        fill.translatesAutoresizingMaskIntoConstraints = NO;
+        fill.backgroundColor = AppBackgroundColor();
+        fill.userInteractionEnabled = NO;
+        [self.view addSubview:fill];
     }
-    [NSLayoutConstraint deactivateConstraints:old];
 
-    _webView.translatesAutoresizingMaskIntoConstraints = NO;
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [_webView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-        [_webView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [_webView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
-        [_webView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [top.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [top.bottomAnchor constraintEqualToAnchor:safe.topAnchor],
+        [top.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [top.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [bottom.topAnchor constraintEqualToAnchor:safe.bottomAnchor],
+        [bottom.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [bottom.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [bottom.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
     ]];
+
+    self.topFill = top;
+    self.bottomFill = bottom;
 }
 
 - (void)startLoading {
@@ -233,25 +243,45 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 
 #pragma mark - App feel
 
-/// The page reports the colour actually drawn under the status bar (app-tweaks.js).
-/// Matching it keeps the status bar readable when Claude's theme differs from the
-/// phone's, and keeps any uncovered edge the same colour as the page.
+/// Reads one {r, g, b} colour (0-255) sent by app-tweaks.js.
+- (UIColor *)colorFromReport:(id)value {
+    if (![value isKindOfClass:NSDictionary.class]) {
+        return nil;
+    }
+    NSDictionary *components = value;
+    NSNumber *r = components[@"r"];
+    NSNumber *g = components[@"g"];
+    NSNumber *b = components[@"b"];
+    if (![r isKindOfClass:NSNumber.class] || ![g isKindOfClass:NSNumber.class] || ![b isKindOfClass:NSNumber.class]) {
+        return nil;
+    }
+    return [UIColor colorWithRed:MIN(MAX(r.doubleValue / 255.0, 0.0), 1.0)
+                           green:MIN(MAX(g.doubleValue / 255.0, 0.0), 1.0)
+                            blue:MIN(MAX(b.doubleValue / 255.0, 0.0), 1.0)
+                           alpha:1.0];
+}
+
+/// The page reports the colours it draws along its top and bottom edges
+/// (app-tweaks.js). The strips outside the safe area take those colours, and the
+/// status bar text follows the top one, so it stays readable whichever theme
+/// Claude is set to.
 - (void)handleAppearance:(id)body {
     if (![body isKindOfClass:NSDictionary.class]) {
         return;
     }
-    NSNumber *r = body[@"r"];
-    NSNumber *g = body[@"g"];
-    NSNumber *b = body[@"b"];
-    if (![r isKindOfClass:NSNumber.class] || ![g isKindOfClass:NSNumber.class] || ![b isKindOfClass:NSNumber.class]) {
+    NSDictionary *report = body;
+    UIColor *top = [self colorFromReport:report[@"top"]];
+    if (top == nil) {
         return;
     }
+    UIColor *bottom = [self colorFromReport:report[@"bottom"]] ?: top;
 
-    CGFloat red = MIN(MAX(r.doubleValue / 255.0, 0.0), 1.0);
-    CGFloat green = MIN(MAX(g.doubleValue / 255.0, 0.0), 1.0);
-    CGFloat blue = MIN(MAX(b.doubleValue / 255.0, 0.0), 1.0);
-    self.view.backgroundColor = [UIColor colorWithRed:red green:green blue:blue alpha:1.0];
+    self.topFill.backgroundColor = top;
+    self.bottomFill.backgroundColor = bottom;
+    self.view.backgroundColor = top;
 
+    CGFloat red = 0, green = 0, blue = 0, alpha = 0;
+    [top getRed:&red green:&green blue:&blue alpha:&alpha];
     CGFloat luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
     UIStatusBarStyle style = luminance < 0.5 ? UIStatusBarStyleLightContent : UIStatusBarStyleDarkContent;
     if (style != self.pageStatusBarStyle) {
