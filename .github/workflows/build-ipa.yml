@@ -71,8 +71,9 @@ jobs:
         run: |
           APP=build/output/Payload/ClaudeLegacy.app
           # Bundled JavaScript must be byte-identical to the files in this repo.
-          cmp ClaudeLegacy/patch.js "$APP/patch.js"
-          cmp ClaudeLegacy/legacy-transpiler.js "$APP/legacy-transpiler.js"
+          for js in ClaudeLegacy/*.js; do
+            cmp "$js" "$APP/$(basename "$js")"
+          done
           diff -r "Polyfills/layout/Library/Application Support/Polyfills" "$APP/Polyfills"
           echo "Bundled JavaScript matches the source."
 
