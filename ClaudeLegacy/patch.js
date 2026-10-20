@@ -92,6 +92,10 @@
     window.LegacyTranspiler.init({
       BASE_URL,
       runScript: (code, src) => {
+        // app-tweaks.js: targeted fixes to claude.ai modules (voice mode on old iOS).
+        if (typeof window.__appPatchModule === "function") {
+          code = window.__appPatchModule(code, shortName(src));
+        }
         window.webkit.messageHandlers.patchScript.postMessage({
           code: code,
           file: shortName(src),

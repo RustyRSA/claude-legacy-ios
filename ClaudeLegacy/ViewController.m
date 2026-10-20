@@ -10,6 +10,18 @@
 #import "LoadingOverlayView.h"
 
 #import <WebKit/WebKit.h>
+#import <SafariServices/SafariServices.h>
+#import <AVFoundation/AVFoundation.h>
+
+/// Background behind the web page, matching claude.ai's own theme colours
+/// (#FCFCFB light, #151515 dark) so no off-colour band shows while it loads.
+static UIColor *AppBackgroundColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
+        ? [UIColor colorWithRed:0x15/255.0 green:0x15/255.0 blue:0x15/255.0 alpha:1.0]
+        : [UIColor colorWithRed:0xFC/255.0 green:0xFC/255.0 blue:0xFB/255.0 alpha:1.0];
+    }];
+}
 
 /// Number of modules the previous successful launch had to transpile — used to
 /// turn the module counter into a real percentage on every launch but the first.
@@ -30,9 +42,12 @@ static const NSTimeInterval kMinimumElapsedBeforeErrorScreen = 30.0;
 /// Hard stop: never keep the overlay up longer than this.
 static const NSTimeInterval kLoadingTimeout = 60.0;
 
-@interface ViewController () <WKNavigationDelegate, WKScriptMessageHandler>
+@interface ViewController () <WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate, UIGestureRecognizerDelegate>
 
 @property (nonatomic) IBOutlet WKWebView *webView;
+
+/// Status bar text colour, set from the page's own background (see -handleAppearance:).
+@property (nonatomic, assign) UIStatusBarStyle pageStatusBarStyle;
 
 @property (nonatomic, strong) LoadingOverlayView *loadingOverlay;
 @property (nonatomic, strong) NSTimer *settleTimer;
@@ -112,25 +127,51 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.view.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
-        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
-        ? [UIColor colorWithRed:31/255.0 green:31/255.0 blue:30/255.0 alpha:1.0]   // #1f1f1e
-        : [UIColor colorWithRed:0xF8/255.0 green:0xF7/255.0 blue:0xF3/255.0 alpha:1.0];  // #F8F7F3
-    }];
+    self.view.backgroundColor = AppBackgroundColor();
+    self.pageStatusBarStyle = UIStatusBarStyleDefault;
 
-    UIRefreshControl *refreshControl = [[UIRefreshControl alloc] init];
-    [refreshControl addTarget:self action:@selector(handleRefresh:) forControlEvents:UIControlEventValueChanged];
-    _webView.scrollView.refreshControl = refreshControl;
+    // Edge to edge, like the native app: claude.ai declares viewport-fit=cover and
+    // pads its own header and message box with env(safe-area-inset-*), so the page
+    // itself fills the status-bar and home-indicator areas.
+    [self pinWebViewToScreenEdges];
+    _webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+
+    // No pull-to-refresh and no rubber-banding of the whole page (the chat list
+    // still scrolls and bounces inside it). Reload lives in the three-finger menu.
+    _webView.scrollView.bounces = NO;
+    _webView.scrollView.alwaysBounceVertical = NO;
+    _webView.scrollView.alwaysBounceHorizontal = NO;
+
+    // No long-press link previews.
+    _webView.allowsLinkPreview = NO;
 
     _webView.opaque = NO;
     _webView.backgroundColor = UIColor.clearColor;
+    _webView.scrollView.backgroundColor = UIColor.clearColor;
     _webView.navigationDelegate = self;
+    _webView.UIDelegate = self;
     _webView.scrollView.scrollEnabled = YES;
 
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"patchScript"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"loadingStatus"];
+    [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"appearance"];
 
     [self.webView addObserver:self forKeyPath:@"estimatedProgress" options:0 context:NULL];
+
+    // Three-finger long press opens a small menu: Reload / Copy debug log.
+    UILongPressGestureRecognizer *menuGesture =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMenuGesture:)];
+    menuGesture.numberOfTouchesRequired = 3;
+    menuGesture.minimumPressDuration = 0.6;
+    menuGesture.cancelsTouchesInView = NO;
+    menuGesture.delegate = self;
+    [_webView addGestureRecognizer:menuGesture];
+
+    // Voice replies must not end up on the quiet earpiece speaker.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(audioRouteChanged:)
+                                                 name:AVAudioSessionRouteChangeNotification
+                                               object:nil];
 
     //[self showLoadingOverlay];
 
@@ -144,11 +185,35 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 - (void)dealloc {
     [_settleTimer invalidate];
     [_webView removeObserver:self forKeyPath:@"estimatedProgress"];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+/// Replaces the storyboard's safe-area constraints: top and bottom go to the
+/// screen edges, sides stay inside the safe area (keeps landscape clear of the
+/// Dynamic Island; in portrait the side insets are zero anyway).
+- (void)pinWebViewToScreenEdges {
+    NSMutableArray<NSLayoutConstraint *> *old = [NSMutableArray array];
+    for (NSLayoutConstraint *constraint in self.view.constraints) {
+        if (constraint.firstItem == _webView || constraint.secondItem == _webView) {
+            [old addObject:constraint];
+        }
+    }
+    [NSLayoutConstraint deactivateConstraints:old];
+
+    _webView.translatesAutoresizingMaskIntoConstraints = NO;
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [_webView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [_webView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [_webView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [_webView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+    ]];
 }
 
 - (void)startLoading {
     [self.loadingOverlay setStage:@"Preparing compatibility layer" detail:nil];
 
+    [self injectScriptNamed:@"app-tweaks"];
     [self injectIOSVersion];
     [self injectCustomCSS];
     [self injectScriptNamed:@"legacy-transpiler"];
@@ -163,11 +228,200 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 }
 
 - (UIStatusBarStyle)preferredStatusBarStyle {
-    return UIStatusBarStyleDefault;
+    return self.pageStatusBarStyle;
 }
 
-- (void)handleRefresh:(UIRefreshControl *)refreshControl {
-    [_webView reload];
+#pragma mark - App feel
+
+/// The page reports the colour actually drawn under the status bar (app-tweaks.js).
+/// Matching it keeps the status bar readable when Claude's theme differs from the
+/// phone's, and keeps any uncovered edge the same colour as the page.
+- (void)handleAppearance:(id)body {
+    if (![body isKindOfClass:NSDictionary.class]) {
+        return;
+    }
+    NSNumber *r = body[@"r"];
+    NSNumber *g = body[@"g"];
+    NSNumber *b = body[@"b"];
+    if (![r isKindOfClass:NSNumber.class] || ![g isKindOfClass:NSNumber.class] || ![b isKindOfClass:NSNumber.class]) {
+        return;
+    }
+
+    CGFloat red = MIN(MAX(r.doubleValue / 255.0, 0.0), 1.0);
+    CGFloat green = MIN(MAX(g.doubleValue / 255.0, 0.0), 1.0);
+    CGFloat blue = MIN(MAX(b.doubleValue / 255.0, 0.0), 1.0);
+    self.view.backgroundColor = [UIColor colorWithRed:red green:green blue:blue alpha:1.0];
+
+    CGFloat luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    UIStatusBarStyle style = luminance < 0.5 ? UIStatusBarStyleLightContent : UIStatusBarStyleDarkContent;
+    if (style != self.pageStatusBarStyle) {
+        self.pageStatusBarStyle = style;
+        [self setNeedsStatusBarAppearanceUpdate];
+    }
+}
+
+- (BOOL)isClaudeHost:(NSString *)host {
+    NSString *lower = host.lowercaseString;
+    return [lower isEqualToString:@"claude.ai"] || [lower hasSuffix:@".claude.ai"];
+}
+
+- (BOOL)isWebURL:(NSURL *)url {
+    NSString *scheme = url.scheme.lowercaseString;
+    return [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+}
+
+- (BOOL)isAppHandoffURL:(NSURL *)url {
+    NSString *scheme = url.scheme.lowercaseString;
+    return [scheme isEqualToString:@"mailto"] || [scheme isEqualToString:@"tel"] || [scheme isEqualToString:@"sms"];
+}
+
+- (UIViewController *)topPresenter {
+    UIViewController *presenter = self;
+    while (presenter.presentedViewController != nil) {
+        presenter = presenter.presentedViewController;
+    }
+    return presenter;
+}
+
+/// Links that leave claude.ai open in an in-app Safari sheet, like the native app.
+- (void)openExternalURL:(NSURL *)url {
+    if (url == nil) {
+        return;
+    }
+    if ([self isWebURL:url]) {
+        SFSafariViewController *safari = [[SFSafariViewController alloc] initWithURL:url];
+        [[self topPresenter] presentViewController:safari animated:YES completion:nil];
+    } else if ([self isAppHandoffURL:url]) {
+        [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
+    }
+}
+
+#pragma mark - Three-finger menu
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+
+- (void)handleMenuGesture:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan || self.presentedViewController != nil) {
+        return;
+    }
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Reload"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        [weakSelf.webView reload];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Copy debug log"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        [weakSelf copyDebugLog];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    // iPad presents action sheets as popovers, which need an anchor.
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect =
+        CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (NSString *)nativeDebugSummary {
+    NSOperatingSystemVersion os = [[NSProcessInfo processInfo] operatingSystemVersion];
+    NSString *appVersion = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    NSString *micPermission = @"not asked yet";
+    switch ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio]) {
+        case AVAuthorizationStatusAuthorized: micPermission = @"granted"; break;
+        case AVAuthorizationStatusDenied: micPermission = @"denied"; break;
+        case AVAuthorizationStatusRestricted: micPermission = @"restricted"; break;
+        default: break;
+    }
+
+    return [NSString stringWithFormat:@"iOS %ld.%ld.%ld, app %@, mic permission %@, audio %@",
+            (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion,
+            appVersion ?: @"?", micPermission, [self audioRouteSummary]];
+}
+
+- (void)copyDebugLog {
+    NSString *header = [self nativeDebugSummary];
+    __weak typeof(self) weakSelf = self;
+    [self.webView evaluateJavaScript:@"window.__appDebugLog ? window.__appDebugLog() : 'page log unavailable'"
+                   completionHandler:^(id result, NSError *error) {
+        NSString *pageLog = [result isKindOfClass:NSString.class]
+            ? result
+            : [NSString stringWithFormat:@"(could not read page log: %@)", error.localizedDescription];
+        UIPasteboard.generalPasteboard.string = [NSString stringWithFormat:@"%@\n%@", header, pageLog];
+
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        UIAlertController *done = [UIAlertController alertControllerWithTitle:@"Debug log copied"
+                                                                      message:nil
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+        [done addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [[strongSelf topPresenter] presentViewController:done animated:YES completion:nil];
+    }];
+}
+
+/// Adds a line to the page-side debug log (and the device console).
+- (void)appendDebugLog:(NSString *)line {
+    NSLog(@"[app] %@", line);
+    NSData *json = [NSJSONSerialization dataWithJSONObject:@[line ?: @""] options:0 error:nil];
+    if (json == nil) {
+        return;
+    }
+    NSString *array = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+    NSString *js = [NSString stringWithFormat:@"window.__appLogNative && window.__appLogNative(%@[0])", array];
+    [self.webView evaluateJavaScript:js completionHandler:nil];
+}
+
+#pragma mark - Audio routing
+
+- (NSString *)audioRouteSummary {
+    AVAudioSession *session = AVAudioSession.sharedInstance;
+    NSMutableArray<NSString *> *outputs = [NSMutableArray array];
+    for (AVAudioSessionPortDescription *port in session.currentRoute.outputs) {
+        [outputs addObject:port.portType];
+    }
+    return [NSString stringWithFormat:@"category %@, output %@",
+            session.category, [outputs componentsJoinedByString:@"+"]];
+}
+
+- (void)audioRouteChanged:(NSNotification *)notification {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self routeToSpeakerIfOnReceiver];
+    });
+}
+
+/// When the microphone is live, iOS can move playback to the earpiece. Voice
+/// mode is meant to be heard from the loudspeaker, so move it back — but only
+/// from the earpiece, never away from headphones or Bluetooth.
+- (void)routeToSpeakerIfOnReceiver {
+    AVAudioSession *session = AVAudioSession.sharedInstance;
+    BOOL onReceiver = NO;
+    for (AVAudioSessionPortDescription *port in session.currentRoute.outputs) {
+        if ([port.portType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
+            onReceiver = YES;
+        }
+    }
+
+    if (onReceiver && [session.category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
+        NSError *error = nil;
+        BOOL ok = [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error];
+        NSString *line = @"audio: moved playback from earpiece to speaker";
+        if (!ok) {
+            line = [NSString stringWithFormat:@"audio: speaker override failed: %@", error.localizedDescription];
+        }
+        [self appendDebugLog:line];
+    } else {
+        [self appendDebugLog:[NSString stringWithFormat:@"audio: route changed, %@", [self audioRouteSummary]]];
+    }
 }
 
 #pragma mark - Loading overlay
@@ -433,6 +687,31 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 
 #pragma mark - WKNavigationDelegate
 
+- (void)webView:(WKWebView *)webView
+    decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
+                    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *url = navigationAction.request.URL;
+    BOOL mainFrame = navigationAction.targetFrame == nil || [navigationAction.targetFrame isMainFrame];
+
+    if (mainFrame && [self isAppHandoffURL:url]) {
+        [self openExternalURL:url];
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+
+    // A tapped link that leaves claude.ai opens in Safari instead of replacing Claude.
+    if (mainFrame
+        && navigationAction.navigationType == WKNavigationTypeLinkActivated
+        && [self isWebURL:url]
+        && ![self isClaudeHost:url.host]) {
+        [self openExternalURL:url];
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
     if ([self isLoadingOverlayVisible]) {
         [self.loadingOverlay setStage:@"Connecting to claude.ai" detail:webView.URL.host];
@@ -448,8 +727,6 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
-    [webView.scrollView.refreshControl endRefreshing];
-
     self.navigationFinished = YES;
     if ([self isLoadingOverlayVisible] && self.modulesDone == 0) {
         [self.loadingOverlay setStage:@"Starting Claude" detail:nil];
@@ -458,24 +735,59 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 }
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
-    [webView.scrollView.refreshControl endRefreshing];
     if (error.code != NSURLErrorCancelled) {
         [self showFailureForError:error];
     }
 }
 
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
-    [webView.scrollView.refreshControl endRefreshing];
     if (error.code != NSURLErrorCancelled) {
         [self showFailureForError:error];
     }
 }
 
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
-    [webView.scrollView.refreshControl endRefreshing];
     [self showLoadingOverlay];
     [self showFailure:@"The web process stopped — the device may have run out of memory."
               details:nil];
+}
+
+#pragma mark - WKUIDelegate
+
+/// Links with target="_blank" and window.open(): claude.ai pages stay in the app,
+/// everything else opens in the in-app Safari sheet.
+- (WKWebView *)webView:(WKWebView *)webView
+    createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
+               forNavigationAction:(WKNavigationAction *)navigationAction
+                    windowFeatures:(WKWindowFeatures *)windowFeatures {
+    NSURL *url = navigationAction.request.URL;
+    if ([self isWebURL:url] && [self isClaudeHost:url.host]) {
+        [webView loadRequest:navigationAction.request];
+    } else {
+        [self openExternalURL:url];
+    }
+    return nil;
+}
+
+/// Voice mode needs the microphone. Grant it to claude.ai without WebKit asking
+/// again every session (iOS itself still asks once, the first time).
+- (void)webView:(WKWebView *)webView
+    requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin
+                          initiatedByFrame:(WKFrameInfo *)frame
+                                      type:(WKMediaCaptureType)type
+                           decisionHandler:(void (^)(WKPermissionDecision decision))decisionHandler API_AVAILABLE(ios(15.0)) {
+    BOOL trusted = [origin.protocol isEqualToString:@"https"] && [self isClaudeHost:origin.host];
+    WKPermissionDecision decision;
+    if (!trusted) {
+        decision = WKPermissionDecisionDeny;
+    } else if (type == WKMediaCaptureTypeMicrophone) {
+        decision = WKPermissionDecisionGrant;
+    } else {
+        decision = WKPermissionDecisionPrompt;
+    }
+    [self appendDebugLog:[NSString stringWithFormat:@"mic: %@ asked for capture type %ld, decision %ld",
+                          origin.host, (long)type, (long)decision]];
+    decisionHandler(decision);
 }
 
 #pragma mark - WKScriptMessageHandler
@@ -485,6 +797,11 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 {
     if ([message.name isEqualToString:@"loadingStatus"]) {
         [self handleLoadingStatus:message.body];
+        return;
+    }
+
+    if ([message.name isEqualToString:@"appearance"]) {
+        [self handleAppearance:message.body];
         return;
     }
 

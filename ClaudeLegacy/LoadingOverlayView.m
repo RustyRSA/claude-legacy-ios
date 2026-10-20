@@ -37,8 +37,8 @@
 - (void)setUp {
     self.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
         return tc.userInterfaceStyle == UIUserInterfaceStyleDark
-        ? [UIColor colorWithRed:31/255.0 green:31/255.0 blue:30/255.0 alpha:1.0]   // #1f1f1e
-        : [UIColor colorWithRed:0xF8/255.0 green:0xF7/255.0 blue:0xF3/255.0 alpha:1.0];  // #F8F7F3
+        ? [UIColor colorWithRed:0x15/255.0 green:0x15/255.0 blue:0x15/255.0 alpha:1.0]   // #151515, claude.ai dark
+        : [UIColor colorWithRed:0xFC/255.0 green:0xFC/255.0 blue:0xFB/255.0 alpha:1.0];  // #FCFCFB, claude.ai light
     }];
 
     UIColor *accent = [UIColor colorWithRed:0xD9/255.0 green:0x77/255.0 blue:0x57/255.0 alpha:1.0]; // #D97757

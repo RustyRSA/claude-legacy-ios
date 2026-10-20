@@ -20,6 +20,7 @@
 		CEADC8472F5E8F29000F74EA /* ClaudeLegacyUITestsLaunchTests.m in Sources */ = {isa = PBXBuildFile; fileRef = CEADC8462F5E8F29000F74EA /* ClaudeLegacyUITestsLaunchTests.m */; };
 		CEADC8662F5E8F29000F74EA /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CEADC82E2F5E8F29000F74EA /* Assets.xcassets */; };
 		E92D5D8E2FC17322005460E8 /* patch.js in Resources */ = {isa = PBXBuildFile; fileRef = CEADC85D2F5E8F29000F74EA /* patch.js */; };
+		1D8800F2E9B4EE64DA93E1E2 /* app-tweaks.js in Resources */ = {isa = PBXBuildFile; fileRef = E9912B068BBAC17623134A9A /* app-tweaks.js */; };
 		E934A9723055443800056BAB /* legacy-transpiler.js in Resources */ = {isa = PBXBuildFile; fileRef = E934A9713055443800056BAB /* legacy-transpiler.js */; };
 		E9AA10032FD0000000000003 /* LoadingOverlayView.m in Sources */ = {isa = PBXBuildFile; fileRef = E9AA10022FD0000000000002 /* LoadingOverlayView.m */; };
 /* End PBXBuildFile section */
@@ -76,6 +77,7 @@
 		CEADC8442F5E8F29000F74EA /* ClaudeLegacyUITests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ClaudeLegacyUITests.m; sourceTree = "<group>"; };
 		CEADC8462F5E8F29000F74EA /* ClaudeLegacyUITestsLaunchTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ClaudeLegacyUITestsLaunchTests.m; sourceTree = "<group>"; };
 		CEADC85D2F5E8F29000F74EA /* patch.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = patch.js; sourceTree = "<group>"; };
+		E9912B068BBAC17623134A9A /* app-tweaks.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "app-tweaks.js"; sourceTree = "<group>"; };
 		E934A9713055443800056BAB /* legacy-transpiler.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "legacy-transpiler.js"; sourceTree = "<group>"; };
 		E9AA10012FD0000000000001 /* LoadingOverlayView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LoadingOverlayView.h; sourceTree = "<group>"; };
 		E9AA10022FD0000000000002 /* LoadingOverlayView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = LoadingOverlayView.m; sourceTree = "<group>"; };
@@ -146,6 +148,7 @@
 				CEADC82E2F5E8F29000F74EA /* Assets.xcassets */,
 				CEADC82F2F5E8F29000F74EA /* Info.plist */,
 				CEADC85D2F5E8F29000F74EA /* patch.js */,
+				E9912B068BBAC17623134A9A /* app-tweaks.js */,
 				CEADC8302F5E8F29000F74EA /* main.m */,
 			);
 			path = ClaudeLegacy;
@@ -276,6 +279,7 @@
 				E934A9723055443800056BAB /* legacy-transpiler.js in Resources */,
 				CEADC82D2F5E8F26000F74EA /* Main.storyboard in Resources */,
 				E92D5D8E2FC17322005460E8 /* patch.js in Resources */,
+				1D8800F2E9B4EE64DA93E1E2 /* app-tweaks.js in Resources */,
 				CEADC82A2F5E8F26000F74EA /* LaunchScreen.storyboard in Resources */,
 				CEADC8662F5E8F29000F74EA /* Assets.xcassets in Resources */,
 			);
