@@ -27,6 +27,9 @@ static UIColor *AppBackgroundColor(void) {
 /// turn the module counter into a real percentage on every launch but the first.
 static NSString *const kModuleCountKey = @"LastModuleCount";
 
+/// Last edge colours reported by the page ({top: {r,g,b}, bottom: {r,g,b}}).
+static NSString *const kEdgeColoursKey = @"LastEdgeColours";
+
 /// Seconds without any module activity before the page is assumed to be ready.
 static const NSTimeInterval kSettleAfterReadySignal = 0.3;
 static const NSTimeInterval kSettleWithoutReadySignal = 6.0;
@@ -139,6 +142,7 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
     // pad itself for the status bar), and the strips above and below it are
     // painted in the page's own edge colours so the screen reads as one surface.
     [self installEdgeFills];
+    [self applyEdgeReport:[[NSUserDefaults standardUserDefaults] objectForKey:kEdgeColoursKey] animated:NO];
 
     // No pull-to-refresh and no rubber-banding of the whole page (the chat list
     // still scrolls and bounces inside it). Reload lives in the three-finger menu.
@@ -264,30 +268,53 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 /// The page reports the colours it draws along its top and bottom edges
 /// (app-tweaks.js). The strips outside the safe area take those colours, and the
 /// status bar text follows the top one, so it stays readable whichever theme
-/// Claude is set to.
+/// Claude is set to. The last report is remembered and applied at the next
+/// launch, so the app opens in Claude's colours instead of flashing the
+/// phone-theme default while the page loads.
 - (void)handleAppearance:(id)body {
+    if ([self applyEdgeReport:body animated:YES]) {
+        [[NSUserDefaults standardUserDefaults] setObject:body forKey:kEdgeColoursKey];
+    }
+}
+
+- (BOOL)applyEdgeReport:(id)body animated:(BOOL)animated {
     if (![body isKindOfClass:NSDictionary.class]) {
-        return;
+        return NO;
     }
     NSDictionary *report = body;
     UIColor *top = [self colorFromReport:report[@"top"]];
     if (top == nil) {
-        return;
+        return NO;
     }
     UIColor *bottom = [self colorFromReport:report[@"bottom"]] ?: top;
-
-    self.topFill.backgroundColor = top;
-    self.bottomFill.backgroundColor = bottom;
-    self.view.backgroundColor = top;
 
     CGFloat red = 0, green = 0, blue = 0, alpha = 0;
     [top getRed:&red green:&green blue:&blue alpha:&alpha];
     CGFloat luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
     UIStatusBarStyle style = luminance < 0.5 ? UIStatusBarStyleLightContent : UIStatusBarStyleDarkContent;
-    if (style != self.pageStatusBarStyle) {
-        self.pageStatusBarStyle = style;
-        [self setNeedsStatusBarAppearanceUpdate];
+
+    void (^apply)(void) = ^{
+        self.topFill.backgroundColor = top;
+        self.bottomFill.backgroundColor = bottom;
+        self.view.backgroundColor = top;
+        if (style != self.pageStatusBarStyle) {
+            self.pageStatusBarStyle = style;
+            [self setNeedsStatusBarAppearanceUpdate];
+        }
+    };
+
+    if (animated) {
+        // A short cross-fade, picking up from wherever a running fade has got
+        // to, so the strips follow the sidebar instead of jumping.
+        [UIView animateWithDuration:0.18
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:apply
+                         completion:nil];
+    } else {
+        apply();
     }
+    return YES;
 }
 
 - (BOOL)isClaudeHost:(NSString *)host {

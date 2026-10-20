@@ -102,9 +102,8 @@
         ", MediaRecorder webm/opus: " + (webmOpus ? "yes" : "no") +
         ", AudioEncoder: " + (typeof window.AudioEncoder !== "undefined" ? "yes" : "no"),
       "voice support check: " + patchStatus.supportCheck,
-      "voice PCM mode: " + patchStatus.pcmMode,
-      "----"
-    ];
+      "voice PCM mode: " + patchStatus.pcmMode
+    ].concat(responsivenessSummary(), ["----"]);
     return header.concat(lines).join("\n");
   };
 
@@ -125,6 +124,7 @@
   var PCM_DEFAULT = /(usePcm\s*:\s*[\w$]+\s*=\s*)!1(\s*,\s*preferredBackend\s*:)/;
 
   window.__appPatchModule = function (code, file) {
+    appStarted = true;
     if (typeof code !== "string") return code;
     try {
       if (code.indexOf("getUserMedia") !== -1 && SUPPORT_CHECK.test(code)) {
@@ -290,9 +290,42 @@
     var style = document.createElement("style");
     style.id = "app-tweaks-style";
     style.textContent =
+      // No long-press callouts on links, no grey flash on tap.
       "a{-webkit-touch-callout:none!important}" +
-      "*{-webkit-tap-highlight-color:transparent!important}";
+      "*{-webkit-tap-highlight-color:transparent!important}" +
+      // Taps fire immediately: no waiting to see whether a double tap follows.
+      "html{touch-action:manipulation}" +
+      // The page itself never rubber-bands.
+      "html,body{overscroll-behavior:none}";
     (document.head || document.documentElement).appendChild(style);
+  }
+
+  // The message box sits inside the same scroll area as the messages, so pulling
+  // past the end of a chat dragged it along. Stop that scroll area (and any
+  // other scroll area holding the message box) from rubber-banding.
+  var COMPOSER = 'div[contenteditable="true"], textarea, [data-testid="chat-input"]';
+  var lastComposerCheck = 0;
+  function pinComposer() {
+    var now = Date.now();
+    if (now - lastComposerCheck < 1000) return;
+    lastComposerCheck = now;
+    var editors = document.querySelectorAll(COMPOSER);
+    var composer = null;
+    var lowest = -Infinity;
+    for (var i = 0; i < editors.length; i++) {
+      var rect = editors[i].getBoundingClientRect();
+      if (rect.height > 0 && rect.bottom > lowest) {
+        lowest = rect.bottom;
+        composer = editors[i];
+      }
+    }
+    for (var el = composer && composer.parentElement; el && el !== document.documentElement; el = el.parentElement) {
+      if (el.__appPinned) continue;
+      if (/(auto|scroll)/.test(getComputedStyle(el).overflowY)) {
+        el.style.setProperty("overscroll-behavior-y", "none");
+        el.__appPinned = true;
+      }
+    }
   }
 
   // Colours ------------------------------------------------------------------
@@ -328,17 +361,26 @@
     }
   }
 
-  // The first opaque background found at (x, y), walking up from the element there.
+  // The colour actually on screen at (x, y): every element stacked at that
+  // point, front to back, blended until an opaque one. A dimming overlay over
+  // the page therefore reads as the dimmed page, not as whatever lies below it.
   function colourAt(x, y) {
-    var el = document.elementFromPoint(x, y);
-    while (el && el.nodeType === 1) {
+    var stack = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [document.elementFromPoint(x, y)];
+    var r = 0, g = 0, b = 0, left = 1;
+    for (var i = 0; i < stack.length && left > 0.01; i++) {
+      var el = stack[i];
+      if (!el || el.nodeType !== 1) continue;
       var c = toRGB(getComputedStyle(el).backgroundColor);
-      if (c && c.a > 0.5) return { r: c.r, g: c.g, b: c.b };
-      el = el.parentElement;
+      if (!c || c.a <= 0) continue;
+      var a = Math.min(1, c.a);
+      r += c.r * a * left;
+      g += c.g * a * left;
+      b += c.b * a * left;
+      left *= 1 - a;
     }
-    if (!document.body) return null;
-    var body = toRGB(getComputedStyle(document.body).backgroundColor);
-    return body && body.a > 0.5 ? { r: body.r, g: body.g, b: body.b } : null;
+    if (left > 0.5) return null; // mostly see-through: nothing to match
+    var scale = 1 / (1 - left);
+    return { r: Math.round(r * scale), g: Math.round(g * scale), b: Math.round(b * scale) };
   }
 
   // Samples just inside the page's top and bottom edges, near the left side so
@@ -364,13 +406,107 @@
     } catch (e) {}
   }
 
+  // ---------------------------------------------------------------------------
+  // Responsiveness measurements (shown at the top of the debug log)
+  // ---------------------------------------------------------------------------
+  var NativeObserver = window.MutationObserver;
+  var appStarted = false; // set when the first claude.ai module runs
+  var domReady = false;   // set once the document (and the polyfills' end-of-document scripts) are in
+  var observerCost = { early: { calls: 0, ms: 0, worst: 0 }, app: { calls: 0, ms: 0, worst: 0 } };
+  var tapReactions = [];
+  var longFrames = { count: 0, worst: 0, frames: 0 };
+
+  // Times every MutationObserver callback. Observers created before claude.ai's
+  // own code starts belong to the compatibility polyfills; later ones to the app.
+  if (typeof NativeObserver === "function" && typeof Proxy === "function" && window.performance) {
+    window.MutationObserver = new Proxy(NativeObserver, {
+      construct: function (Target, args, newTarget) {
+        var callback = args[0];
+        var bucket = appStarted && domReady ? observerCost.app : observerCost.early;
+        if (typeof callback === "function") {
+          args = [function () {
+            var t = performance.now();
+            try {
+              return callback.apply(this, arguments);
+            } finally {
+              var spent = performance.now() - t;
+              bucket.calls++;
+              bucket.ms += spent;
+              if (spent > bucket.worst) bucket.worst = spent;
+            }
+          }].concat(Array.prototype.slice.call(args, 1));
+        }
+        return Reflect.construct(Target, args, newTarget);
+      }
+    });
+  }
+
+  // After each tap: how long until the page changes anything, and whether any
+  // frame in the next 1.2 s took longer than 50 ms.
+  function measureTap() {
+    var tappedAt = performance.now();
+    if (typeof NativeObserver === "function") {
+      var done = false;
+      var watcher = new NativeObserver(function () {
+        if (done) return;
+        done = true;
+        watcher.disconnect();
+        tapReactions.push(performance.now() - tappedAt);
+        if (tapReactions.length > 40) tapReactions.shift();
+      });
+      watcher.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+      setTimeout(function () {
+        if (!done) { done = true; watcher.disconnect(); }
+      }, 1000);
+    }
+    watchFrames();
+  }
+
+  // One frame watcher at a time; each tap extends it to 1.2 s after that tap.
+  var frameWatchUntil = 0;
+  var frameWatchRunning = false;
+  function watchFrames() {
+    frameWatchUntil = performance.now() + 1200;
+    if (frameWatchRunning) return;
+    frameWatchRunning = true;
+    var last = performance.now();
+    var frame = function (now) {
+      var gap = now - last;
+      last = now;
+      longFrames.frames++;
+      if (gap > 50) longFrames.count++;
+      if (gap > longFrames.worst) longFrames.worst = gap;
+      if (now < frameWatchUntil) window.requestAnimationFrame(frame);
+      else frameWatchRunning = false;
+    };
+    window.requestAnimationFrame(frame);
+  }
+
+  function round(n) { return Math.round(n); }
+  function responsivenessSummary() {
+    var sorted = tapReactions.slice().sort(function (a, b) { return a - b; });
+    var median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+    var worst = sorted.length ? sorted[sorted.length - 1] : 0;
+    return [
+      "taps measured: " + sorted.length + ", page reacts after median " + round(median) + " ms (worst " + round(worst) + " ms)",
+      "frames after taps: " + longFrames.frames + ", over 50 ms: " + longFrames.count + " (worst " + round(longFrames.worst) + " ms)",
+      "page-watching work: polyfills " + round(observerCost.early.ms) + " ms in " + observerCost.early.calls +
+        " calls (worst " + round(observerCost.early.worst) + " ms), claude.ai " + round(observerCost.app.ms) + " ms in " +
+        observerCost.app.calls + " calls (worst " + round(observerCost.app.worst) + " ms)"
+    ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Start-up
+  // ---------------------------------------------------------------------------
   function onReady() {
+    domReady = true;
     lockViewport();
     addStyle();
     reportAppearance();
     try {
-      if (document.head) {
-        new MutationObserver(lockViewport).observe(document.head, {
+      if (document.head && typeof NativeObserver === "function") {
+        new NativeObserver(lockViewport).observe(document.head, {
           childList: true, subtree: true, attributes: true, attributeFilter: ["content"]
         });
       }
@@ -380,24 +516,21 @@
         pending = setTimeout(function () { pending = null; reportAppearance(); }, 150);
       };
       var themeAttributes = { attributes: true, attributeFilter: ["class", "style", "data-theme", "data-mode"] };
-      new MutationObserver(schedule).observe(document.documentElement, themeAttributes);
-      if (document.body) new MutationObserver(schedule).observe(document.body, themeAttributes);
+      if (typeof NativeObserver === "function") {
+        new NativeObserver(schedule).observe(document.documentElement, themeAttributes);
+        if (document.body) new NativeObserver(schedule).observe(document.body, themeAttributes);
+      }
       if (window.matchMedia) {
         var dark = window.matchMedia("(prefers-color-scheme: dark)");
         if (dark.addEventListener) dark.addEventListener("change", schedule);
       }
-      // Opening the sidebar or a sheet changes the edge colours. Follow the
-      // animation frame by frame for a moment after each tap, so the strips change
-      // together with the page (reports are only sent when a colour changes).
-      var followUntil = 0;
-      var follow = function () {
-        reportAppearance();
-        if (Date.now() < followUntil) window.requestAnimationFrame(follow);
-      };
+      document.addEventListener("touchstart", pinComposer, { passive: true, capture: true });
+      // Opening the sidebar or a sheet changes the edge colours. Re-check a few
+      // times while the animation runs; the app cross-fades between reports.
+      var SAMPLE_TIMES = [60, 140, 240, 380, 560];
       document.addEventListener("touchend", function () {
-        var running = Date.now() < followUntil;
-        followUntil = Date.now() + 700;
-        if (!running) window.requestAnimationFrame(follow);
+        measureTap();
+        for (var i = 0; i < SAMPLE_TIMES.length; i++) setTimeout(reportAppearance, SAMPLE_TIMES[i]);
       }, { passive: true, capture: true });
     } catch (e) {
       record("app", "observer setup failed: " + describe(e));
