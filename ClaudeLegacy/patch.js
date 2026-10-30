@@ -3,6 +3,12 @@
     "https://assets-proxy.anthropic.com/claude-ai/v2/assets/v1";
 //  const BASE_URL = window.location.href
 
+  // Set by the app before this script runs (ViewController.m).
+  const settings = window.__appSettings || {};
+  const FAST = settings.fastLoad !== false;
+  const MANIFEST_KEY = "__appModuleManifest";
+  const HISTORY_KEY = "__appModuleHistory";
+
   const status = (payload) => {
     try {
       window.webkit.messageHandlers.loadingStatus.postMessage(payload);
@@ -19,7 +25,7 @@
     status({ stage: "error", message: String(message), fatal: !!fatal });
   };
 
-  status({ stage: "boot" });
+  status({ stage: "boot", mode: FAST ? "fast" : "classic" });
 
   // Anything thrown while the page is still loading is worth showing: at that
   // point a failure means a blank screen, not a glitch in an already-running app.
@@ -46,18 +52,7 @@
     );
     return;
   }
-
-  // Report every module download so the loading screen can name the file it waits on.
-  const originalFetch = window.fetch;
-  if (typeof originalFetch === "function") {
-    window.fetch = function (input) {
-      const url = typeof input === "string" ? input : (input && input.url) || "";
-      if (url.indexOf(BASE_URL) === 0) {
-        status({ stage: "download", file: shortName(url) });
-      }
-      return originalFetch.apply(this, arguments);
-    };
-  }
+  const LT = window.LegacyTranspiler;
 
   // The page is considered loaded once module activity settles and something is painted.
   let readySent = false;
@@ -88,18 +83,102 @@
     readyTimer = setTimeout(checkReady, 800);
   };
 
+  // ---- Running a module -----------------------------------------------------
+  // Fast mode runs each module as an inline <script> carrying the page's own CSP
+  // nonce: no round trip through the app, and errors keep their real message
+  // and the module's file name (code run by the app only ever reports "Script
+  // error."). If the page has no nonce or its policy refuses the script, the
+  // module goes through the app instead, as in classic mode.
+  let nonce = "";
+  const takeNonce = (node) => {
+    if (nonce || !node) return;
+    const value = node.nonce || (node.getAttribute && node.getAttribute("nonce"));
+    if (value) nonce = value;
+  };
+  const findNonce = () => {
+    if (!nonce) {
+      const scripts = document.getElementsByTagName("script");
+      for (let i = 0; i < scripts.length && !nonce; i++) takeNonce(scripts[i]);
+    }
+    return nonce;
+  };
+
+  let inPage = FAST;
+  let inlineRuns = 0;
+  const STRICT = "'use strict';";
+
+  const runInPage = (code, src) => {
+    const value = findNonce();
+    if (!value) return false;
+    const id = ++inlineRuns;
+    const marker = "window.__appInlineRan=" + id + ";";
+    const body = (code.startsWith(STRICT)
+      ? STRICT + marker + code.slice(STRICT.length)
+      : marker + code) + "\n//# sourceURL=" + src;
+    let failure = null;
+    const onError = (event) => {
+      if (window.__appInlineRan !== id) failure = event;
+    };
+    window.addEventListener("error", onError, true);
+    const script = document.createElement("script");
+    script.nonce = value;
+    script.setAttribute("nonce", value);
+    script.text = body;
+    (document.head || document.documentElement).appendChild(script);
+    window.removeEventListener("error", onError, true);
+    script.remove();
+    if (window.__appInlineRan === id) return true;
+    if (failure) {
+      // The module itself is broken (a syntax error this engine cannot parse).
+      reportError(shortName(src) + ": " + (failure.message || "script error"), false);
+      return true;
+    }
+    return false; // refused by the page's security policy
+  };
+
+  const runThroughApp = (code, src) => {
+    window.webkit.messageHandlers.patchScript.postMessage({
+      code: code,
+      file: shortName(src),
+    });
+  };
+
   try {
-    window.LegacyTranspiler.init({
+    let manifest = [];
+    if (FAST) {
+      try {
+        manifest = JSON.parse(localStorage.getItem(MANIFEST_KEY) || "[]");
+        if (!Array.isArray(manifest)) manifest = [];
+      } catch (e) {
+        manifest = [];
+      }
+    }
+
+    LT.init({
       BASE_URL,
+      fast: FAST,
+      minify: FAST,
+      manifest: manifest,
+      workerSource: FAST ? window.__appWorkerSource : undefined,
+      workerCount: 2,
       runScript: (code, src) => {
         // app-tweaks.js: targeted fixes to claude.ai modules (voice mode on old iOS).
         if (typeof window.__appPatchModule === "function") {
           code = window.__appPatchModule(code, shortName(src));
         }
-        window.webkit.messageHandlers.patchScript.postMessage({
-          code: code,
-          file: shortName(src),
-        });
+        let ran = false;
+        if (inPage) {
+          ran = runInPage(code, src);
+          if (!ran) {
+            inPage = false;
+            status({ stage: "inline-refused", file: shortName(src) });
+          }
+        }
+        if (ran) {
+          status({ stage: "module", file: shortName(src) });
+        } else {
+          runThroughApp(code, src);
+        }
         scheduleReadyCheck();
       },
       target: {
@@ -107,19 +186,71 @@
         version: iosVersion
       }
     });
+    try {
+      delete window.__appWorkerSource;
+    } catch (e) {}
   } catch (e) {
     reportError("LegacyTranspiler.init failed: " + (e && e.message ? e.message : e), true);
     return;
   }
 
+  window.__appLoader = {
+    mode: FAST ? "fast" : "classic",
+    inPage: () => inPage,
+    inlineRuns: () => inlineRuns,
+    hasNonce: () => !!findNonce(),
+  };
+
+  // ---- Remembering what this launch used --------------------------------------
+  // The list lets the next launch read those modules from the cache in parallel,
+  // and the last three launches' lists decide what stays in the cache.
+  const sessionId = String(Date.now());
+  const saveUsage = (prune) => {
+    if (!FAST || typeof LT.usedModules !== "function") return;
+    try {
+      const used = LT.usedModules();
+      if (!used.length) return;
+      if (prune) localStorage.setItem(MANIFEST_KEY, JSON.stringify(used.slice(0, 800)));
+      let history = [];
+      try {
+        history = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+      } catch (e) {}
+      if (!Array.isArray(history)) history = [];
+      history = history.filter((h) => h && h.id !== sessionId && Array.isArray(h.used));
+      history.unshift({ id: sessionId, used: used.slice(0, 3000) });
+      history = history.slice(0, 3);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+      if (prune) {
+        const keep = [];
+        history.forEach((h) => keep.push.apply(keep, h.used));
+        LT.pruneCache(keep);
+        LT.releaseUnused();
+      }
+    } catch (e) {}
+  };
+  setTimeout(() => saveUsage(true), 45000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") saveUsage(false);
+  });
+
+  // ---- Entry scripts ----------------------------------------------------------
+  // claude.ai's own entry (index-*.js) and any other module entry served from
+  // its asset host, such as the artifact and document viewer (frame-shell-*.js).
+  const isEntry = (node) =>
+    node.src &&
+    (node.src.includes("index") ||
+      (node.type === "module" && node.src.indexOf(BASE_URL + "/") === 0));
+
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
-        if (node.tagName === "SCRIPT" && node.src && node.src.includes('index')) {
+        if (node.tagName !== "SCRIPT") continue;
+        takeNonce(node);
+        if (isEntry(node)) {
           node.type = "javascript/blocked";
           const src = node.src;
           try {
-            window.LegacyTranspiler.loadCode(src)
+            LT.loadCode(src)
           } catch (e) {
             // The entry chunk is blocked at this point, so failing here means
             // nothing will ever render.

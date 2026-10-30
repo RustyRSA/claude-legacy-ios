@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Page-side tests for the app's JavaScript (run with tests/run.sh)",
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

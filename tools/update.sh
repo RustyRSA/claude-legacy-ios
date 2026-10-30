@@ -5,6 +5,8 @@
 #   bash tools/update.sh --build-only     build (or reuse a build of) what is pushed
 #   bash tools/update.sh --no-install     stop after downloading and checking the IPA
 #   bash tools/update.sh --rebuild        always start a fresh build
+#   bash tools/update.sh --phone root@IP  set how to reach the phone (saved), e.g.
+#                                         root@192.168.1.20 when only key login works
 #
 # Without a patch path it uses the newest claude-legacy-*.patch in ~/Downloads.
 # Run it from Git Bash inside the repository. Needs: git, GitHub CLI (gh, signed
@@ -21,13 +23,16 @@ main() {
   local PHONE_FILE="$HOME/.claude-legacy-phone"
   local REMOTE_IPA="/var/mobile/Documents/ClaudeLegacy.ipa"
 
-  local APPLY=1 INSTALL=1 REBUILD=0 PATCH="" arg
+  local APPLY=1 INSTALL=1 REBUILD=0 PATCH="" arg PHONE_ARG="" NEXT_IS_PHONE=0
   for arg in "$@"; do
+    if [ "$NEXT_IS_PHONE" = 1 ]; then PHONE_ARG="$arg"; NEXT_IS_PHONE=0; continue; fi
     case "$arg" in
       --build-only) APPLY=0 ;;
       --no-install) INSTALL=0 ;;
       --rebuild) REBUILD=1 ;;
-      -h|--help) sed -n '2,11p' "${BASH_SOURCE[0]}"; return 0 ;;
+      --phone=*) PHONE_ARG="${arg#--phone=}" ;;
+      --phone) NEXT_IS_PHONE=1 ;;
+      -h|--help) sed -n '2,13p' "${BASH_SOURCE[0]}"; return 0 ;;
       -*) die "unknown option: $arg" ;;
       *) PATCH="$arg" ;;
     esac
@@ -179,20 +184,24 @@ main() {
   fi
 
   # -------------------------------------------------------------- 4. install
-  local PHONE="${PHONE_IP:-$(cat "$PHONE_FILE" 2>/dev/null || true)}"
+  # The phone is saved as user@address; a bare address means the mobile user.
+  local PHONE="${PHONE_ARG:-${PHONE_IP:-$(cat "$PHONE_FILE" 2>/dev/null || true)}}"
   if [ -z "$PHONE" ]; then
     read -r -p "iPhone IP address (Settings > Wi-Fi > (i)): " PHONE
     [ -n "$PHONE" ] || die "No IP address given."
-    echo "$PHONE" > "$PHONE_FILE"
   fi
+  case "$PHONE" in *@*) ;; *) PHONE="mobile@$PHONE" ;; esac
+  echo "$PHONE" > "$PHONE_FILE"
+  local PHONE_USER="${PHONE%%@*}" SUDO="sudo "
+  [ "$PHONE_USER" = root ] && SUDO=""
 
-  step "Copying to the iPhone at $PHONE (password: the phone's mobile user)"
-  scp -q "$IPA" "mobile@$PHONE:$REMOTE_IPA" || die "Copy failed. Is the phone awake, on the same network, with SSH running?"
+  step "Copying to the iPhone ($PHONE)"
+  scp -q "$IPA" "$PHONE:$REMOTE_IPA" || die "Copy failed. Is the phone awake, on the same network, with SSH running? If it only accepts your key now, run once with: --phone root@<address>"
 
-  step "Installing with TrollStore (sudo may ask for the same password)"
-  if ssh -t "mobile@$PHONE" "helper=\$(sudo find /var/containers/Bundle/Application -maxdepth 3 -name trollstorehelper | head -n 1); \
+  step "Installing with TrollStore${SUDO:+ (sudo may ask for the mobile user password)}"
+  if ssh -t "$PHONE" "helper=\$(${SUDO}find /var/containers/Bundle/Application -maxdepth 3 -name trollstorehelper | head -n 1); \
       [ -n \"\$helper\" ] || { echo 'TrollStore helper not found'; exit 1; }; \
-      sudo \"\$helper\" install $REMOTE_IPA && rm -f $REMOTE_IPA"; then
+      ${SUDO}\"\$helper\" install $REMOTE_IPA && rm -f $REMOTE_IPA"; then
     echo
     echo "Done: the new build is installed. Open Claude on the phone."
   else

@@ -1,0 +1,273 @@
+# CLAUDE.md — Claude Legacy (RustyRSA fork)
+
+Handoff notes for Claude Code. Read this first, then `docs` links at the end.
+
+## What this is
+
+A native iOS app that runs **claude.ai** inside a `WKWebView` on **iOS 16.3.1**
+(Logan's jailbroken iPhone 14 Pro, installed with TrollStore). The official app
+needs a newer iOS and Safari 16.3 cannot run claude.ai, so the app rewrites
+claude.ai's JavaScript at runtime into something WebKit 16.3 can execute.
+
+- Fork of [mgefimov/claude-legacy-ios](https://github.com/mgefimov/claude-legacy-ios)
+  (forked at upstream `c413195`). Owner: Logan (GitHub `RustyRSA`).
+- Logan builds **only from this fork**, through the GitHub Actions workflow, so the
+  IPA comes from code he has seen. Never suggest the upstream release IPA.
+- Goal: parity with modern native AI iPhone apps. Main use: quickly opening a
+  previous chat (often started on desktop) to look something up.
+- Working attitude Logan asked for: do not dismiss fixes as impossible because of
+  iOS 16. State real limits, keep looking for workarounds ("there's always a way").
+  An earlier session wrongly concluded this could not work at all.
+
+## How it works
+
+Injected as `WKUserScript`s at document start, in this order
+(`-startLoading` / `-applySettingAndReload` in `ViewController.m`):
+
+| Order | Script | Role |
+|---|---|---|
+| 1 | settings (inline) | `window.__appSettings` = `{fastLoad, tapFix, pageScale}` from the app menu |
+| 2 | `app-tweaks.js` | Ours. App feel, page size, tap fix, voice patches, WebSocket address fix, debug log and measurements |
+| 3 | iOS version (inline) | `window.iosVersion` |
+| 4 | custom CSS (document end) | Upstream: hides "Continue with Google" (Google blocks embedded web views) |
+| 5 | `legacy-transpiler.js` | Bundle of [mgefimov/legacy-transpiler](https://github.com/mgefimov/legacy-transpiler) 0.1.24 (acorn + astring + transforms) **plus our loader changes** in its `src/index.ts` section |
+| 6 | worker source (inline) | Fast loading: transpiler + `transpile-worker.js` as a string, turned into background Workers |
+| 7 | `patch.js` | Blocks claude.ai's entry module script, starts the loader, runs each module |
+| 8 | PoomSmart Polyfills | Submodule `Polyfills` (pinned commit), injected by `PolyfillsLoader.m`: base scripts plus every version folder newer than the running iOS |
+
+The transpiler parses each ES module with acorn, turns `import`/`export` into
+calls on `window.LegacyTranspiler` (`importModule`, `exportModule`,
+`onExportsUpdated`), wraps the module in an async IIFE, replaces regex lookbehinds
+(unsupported before iOS 16.4) and class static blocks, and prints it with astring.
+Results are cached in CacheStorage on claude.ai's origin.
+
+Modules run in one of two ways (`patch.js`):
+- **Fast loading (default, round 6):** as an inline `<script>` carrying the page's
+  own CSP nonce. No round trip through the app, real error messages, module file
+  names in stacks (`//# sourceURL`).
+- **Through the app (classic / fallback):** the code is posted to the native
+  `patchScript` handler, which runs it with `evaluateJavaScript` (bypasses CSP; all
+  errors show as "Script error.").
+
+### Loader (round 6, `legacy-transpiler.js` → "Module loading")
+- Classic mode = upstream behaviour (serial, cache `transpiled-v0.1.24`).
+- Fast mode: one cache handle; cache `transpiled-fast-v0.1.24-1` with minified
+  output; every module starts with `'use strict';\n//@deps ./a.js ./b.js\n` so its
+  static imports are fetched as soon as its code is known (`warm()`); cache misses
+  are downloaded and transpiled in 2 background Workers (`transpile-worker.js`,
+  20 s timeout, page fallback); the modules the last launch used
+  (`localStorage.__appModuleManifest`) are read from the cache in parallel at boot;
+  after 45 s, caches/entries not used by the last 3 launches
+  (`__appModuleHistory`) are deleted. Execution order is unchanged.
+- `LegacyTranspiler.stats()` feeds the launch section of the debug log.
+
+## Files
+
+| Path | What |
+|---|---|
+| `ClaudeLegacy/ViewController.m` | Native shell: web view, edge colour strips, menu, bridge handlers, crash recovery, session cookies, sign-in links, mic permission, debug log |
+| `ClaudeLegacy/app-tweaks.js` | Page-side app behaviour and diagnostics (see header comment) |
+| `ClaudeLegacy/patch.js` | Entry interception, module running, launch manifest |
+| `ClaudeLegacy/legacy-transpiler.js` | Transpiler bundle + our loader (edit the "Module loading" block; the rest is upstream) |
+| `ClaudeLegacy/transpile-worker.js` | Worker message handler (joined to the transpiler at runtime) |
+| `ClaudeLegacy/SceneDelegate.m` | `claudelegacy://` links |
+| `ClaudeLegacy/LoadingOverlayView.m` | Loading / error overlay (normally hidden at launch) |
+| `ClaudeLegacy/PolyfillsLoader.m` | Upstream polyfill injection |
+| `ClaudeLegacy/Info.plist` | Mic text, `claudelegacy` URL scheme, `UIBackgroundModes: audio` |
+| `.github/workflows/build-ipa.yml` | The build (see below) |
+| `tools/update.sh` | Logan's one-command update from Git Bash on Windows |
+| `tests/` | Node/jsdom tests for the JavaScript: `bash tests/run.sh` |
+
+## Build and install
+
+There is no Mac. **Every native change is first compiled by CI**, so be careful
+with Objective-C (method names, types, nullability) — a typo costs Logan a round
+trip. Run `bash tests/run.sh` before handing anything over; it also checks bracket
+balance in the `.m` files.
+
+**Workflow `build-ipa.yml`** (manual `workflow_dispatch`, `contents: read`,
+`macos-15`): actions pinned by SHA, submodules over HTTPS, unsigned
+`xcodebuild archive` with build.sh's flags, IPA packaged, then verified (every
+`ClaudeLegacy/*.js` byte-identical in the bundle, Polyfills folder identical,
+`vtool` minimum OS ≤ 16.3), SHA-256 printed (`IPA SHA-256: …`) and in the run
+summary, artifact `ClaudeLegacy-ipa`.
+
+**`tools/update.sh`** (Git Bash, from the repo):
+`bash tools/update.sh [file.patch]` applies the newest `~/Downloads/claude-legacy-*.patch`
+(or reports "already applied"), commits with the Subject line, pushes, starts or
+reuses a build (a run whose commit differs only under `tools/` is reused), watches
+it, downloads the IPA, checks the SHA-256 against the run log, copies it to the
+phone over SSH and installs with `trollstorehelper`. Options: `--build-only`,
+`--no-install`, `--rebuild`, `--phone user@address` (saved in
+`~/.claude-legacy-phone`; a bare address means `mobile@` with sudo; `root@` runs
+without sudo — use it if the phone only accepts Logan's SSH key).
+
+- Commits use the repository-local GitHub no-reply address (set by the script);
+  Logan blocked pushes that expose his email. Never commit his personal email.
+- Logan said he won't add Claude as a co-author for now: no `Co-Authored-By`
+  or other Claude attribution trailers in this repo's commits.
+- From Claude Code on his PC you can edit, commit and push directly instead of
+  making patch files; the build/install steps of `update.sh` still apply
+  (`bash tools/update.sh --build-only`).
+
+## History of changes (rounds)
+
+| Commit | Round | Change |
+|---|---|---|
+| `1a49481`, `a67e7d2`, `2102cc7` | — | Logan: workflow and upload |
+| `b313dda` | 02 | Safe-area layout with native colour strips, no bounce/pull-to-refresh, no zoom, voice log, update script |
+| `3fda3ec` | 03 | update.sh: fork targeting, build reuse, no-reply author |
+| `9c99976` | 04 | Voice mode works: https→wss WebSocket conversion (Safari 16 throws on https: socket URLs), PCM recording patch |
+| `7e8e00c` | 05 | Full-bleed icon (no white flash), launch colours, smoother edge colours, steady composer (overscroll), tap tweaks |
+| (next) | 06 | This round, see below |
+
+### Round 06 (30 Oct 2026)
+- Fast loading (loader above) with in-page nonce execution; Advanced menu toggle.
+- Debug log: launch timeline (modules, cache hits/misses, transpile/download time,
+  interactive time = React owns the message box, send button time, API calls at
+  launch, timers ≥ 2 s with caller, main-thread stalls), taps without a click,
+  chat-open timings (address → data → screen settled), long-press info, page
+  hidden/visible with mic/audio/socket state, on-screen controls and sizes.
+- Persistent **app event log** (NSUserDefaults `AppEventLog`, 200 lines) shown at
+  the top of the copied log: launches, background/foreground, page process
+  stopped, reloads, sign-in cookie changes (fingerprint only), refused API
+  requests (401/403 + error code), sign-outs.
+- Sign-in cookie protection: WebKit cookie flush (private
+  `_flushCookiesToDiskWithCompletionHandler:`, guarded) on change and on going to
+  the background; app copy of claude.ai's persistent cookies
+  (`Application Support/session-cookies.plist`, CompleteUntilFirstUserAuthentication,
+  excluded from backup) restored at launch when missing or older.
+- Sign-in links: "Open copied link" menu item, offer on sign-in pages when a link
+  is on the clipboard, `claudelegacy://` scheme. Every link is shown and needs a tap;
+  only `https://claude.ai` addresses. Verification itself is never automated.
+- Page process killed by iOS: reload in place (same chat); error screen only after
+  3 stops in 90 s, and its Continue reloads.
+- Bridge security fix and mic scope fix (see Security).
+- Page size 100 / 110 (default) / 118 % via the viewport (narrower layout width,
+  zoomed to fit; no claude.ai selectors).
+- Tap fix: WebKit's pretend mouse events after a touch are kept from the page for
+  1 s, so hover reveals cannot swallow the click (suspected sidebar cause). Toggle.
+- Long-press: link callout restored (round 02 CSS had disabled it), message text
+  selectable (`.font-claude-response`, `.font-user-message`, `[data-testid=user-message]`).
+- Artifact/Doc pages: `frame-shell-*.js` entry now intercepted (any module script
+  from the asset host). The document itself still runs in a cross-origin frame
+  (see open items).
+- `UIBackgroundModes: audio` for voice in the background (effect unverified).
+- update.sh `--phone`; tests added to the repo.
+
+## Measurements and facts (Oct 2026)
+
+- claude.ai startup graph: `index-*.js` + static imports = **75 modules,
+  18.6 MB** minified source → 27.1 MB transpiled (22.2 MB minified). Full transpile
+  of those took **6.2 s on a desktop CPU** (Chromium); expect more on the phone.
+  A 580 KB module ≈ 0.2 s. The whole reachable graph is ~3,500 files / 128 MB.
+- Only 20 of the 75 contain regex lookbehind and 2 contain static blocks — the
+  syntax 16.3 cannot parse — but every module needs the import/export rewrite in
+  the current design.
+- claude.ai CSP: `script-src 'nonce-…' 'strict-dynamic'` + hashes +
+  `'wasm-unsafe-eval'` (no `unsafe-eval`); `worker-src 'self' blob: assets.claude.ai
+  assets-proxy.anthropic.com s-cdn.anthropic.com`; no `connect-src`/`default-src`.
+  Nonce'd inline scripts and blob Workers were verified to run under this policy
+  (desktop Chromium); worker output is byte-identical to page output.
+- Before round 06: `patch.js`'s fetch wrapper never ran (the transpiler's
+  `patchFetch` makes `window.fetch` a getter that ignores assignment).
+- Artifact URL `claude.ai/artifact/<id>`: HTML shell, entry `frame-shell-*.js`
+  (imports `preload-helper`, `shared-frame-boot`), document rendered in an iframe
+  at `<uuid>.frame.claudeusercontent.com` (also `<uuid>-top.frame…`).
+- Involuntary sign-out: after an API request is refused as an auth error (with
+  "settle" retries), claude.ai goes to `/logout?involuntary=1&returnTo=/login?from=logout&reauth=1…`.
+  So a sign-out means the server refused the session: cookie missing/stale or
+  session revoked. The round 06 event log tells these apart.
+- Voice: module `c3e5e55a7-*.js` (name changes per build) does not end the session
+  on `visibilitychange`; it detects a system-muted mic and sleep. Background stop is
+  WebKit/iOS suspending the page and muting capture.
+- claude.ai uses Base UI context menus (long-press, inline `WebkitTouchCallout:none`).
+- Voice availability hook needs getUserMedia and (AudioEncoder + MediaStreamTrackProcessor
+  or MediaRecorder webm/opus); round 04 patches force it on and switch to PCM.
+
+## Security notes
+
+Reviewed: `ViewController.m`, `patch.js`, the transpiler's own transforms and
+loader, the Polyfills files loaded on 16.3. acorn, astring, pako and the Temporal
+polyfill bundled in the transpiler were only scanned (well-known libraries).
+The app's code only contacts `claude.ai` and `assets-proxy.anthropic.com`; no
+analytics of its own (claude.ai itself runs Datadog RUM).
+
+- **Fixed in 06 — bridge open to every frame.** `window.webkit.messageHandlers`
+  exists in all frames, including embedded third-party and user-generated content
+  (artifacts, previews, videos). `patchScript` runs code in the main page, so any
+  embedded frame could have run code with the signed-in claude.ai session. Now
+  every handler accepts messages only from the top frame of `https://claude.ai`.
+- **Fixed in 06 — microphone auto-grant** covered every `*.claude.ai` subdomain and
+  any frame; now only `claude.ai`'s top frame (others denied).
+- Residual: transpiled code lives in claude.ai's CacheStorage; code running on
+  claude.ai could tamper with it and persist across launches. Only claude.ai's own
+  origin can write there.
+- Session copy (06) is stored with the same protection class iOS uses for
+  WebKit's own cookie file, never logged (fingerprints only), not backed up.
+- Private API use: the cookie flush selector only (guarded by `respondsToSelector:`).
+- Debug log: no message content, ids shortened, socket tickets never logged.
+
+## Logan's requirements to keep
+
+- When a sign-out happens he wants to go through claude.ai's **normal email
+  verification manually**, for security. Do not bypass or automate it; only make
+  that normal flow work on iOS 16.3.1 (link opened inside the app, or a Safari-side
+  fix via his own jailbreak tweak suite, Snap).
+- Keep account access minimal: no connectors that alter data behind his logins.
+- Before blaming an outside party (claude.ai, Apple, an ISP), rule out causes on
+  this app's side first.
+- Metric units. Commands for him: one line each, labelled "PowerShell (PC)" or
+  "phone SSH"; the phone shell is zsh without awk/pkill; multi-line pastes over SSH
+  get mangled.
+- He doesn't want to read long explanations: lead with the decision or the steps.
+- He has a personal brace/indent style; match the file you are in and ask before
+  reformatting.
+
+## Decisions (30 Oct 2026)
+
+- **Patch vs rebuild:** rebuild in place. Keep the transpiler transforms, acorn/
+  astring and the Polyfills as pinned, reviewed dependencies; own and rewrite
+  everything around them (native shell, loader — done). A from-scratch rebuild
+  would recreate the same three pieces. Revisit only if measurements show the
+  transpile design itself is the bottleneck (then: text-level patching of only the
+  modules that need it + native module loading).
+- **UI strategy (recommended, Logan to confirm):** layered — (1) selector-free
+  global changes (page size, tap fix) done; (2) targeted touch-ups keyed on
+  `aria-label` / `data-testid` that fail soft when claude.ai changes; (3) a native
+  chat list + read-only chat viewer for instant look-ups while claude.ai loads;
+  no full redesign of claude.ai's UI.
+
+## Open items
+
+| Item | Status |
+|---|---|
+| Launch ~15 s every time | 06 adds fast loading + full timeline. Next: read Logan's debug log after a second launch; fix whatever dominates (transpile, cache saves failing, evaluation, a long timer, API calls) |
+| Send button / mic / chats appear late | Same as above (they appear when React hydrates); native chat list would bypass it |
+| Sidebar taps sometimes do nothing | 06 tap fix + "taps without a click" counter. Confirm with the log; if misses remain, look at the logged targets |
+| Chat switch ~2 s | 06 logs address/data/settled times; decide between API and rendering |
+| Bigger controls | 06 page size 110 %. Next: per-control sizing from the "on screen now" list |
+| Random sign-outs (high priority) | 06 cookie flush + copy + event log. Check the log after the next sign-out: cookie present when refused → server side; missing → client side |
+| Re-login verification opens in Safari | 06 copied-link flow, `claudelegacy://` + Safari bookmarklet; optional Snap tweak redirect later |
+| Voice stops when locked / app switched | 06 background audio mode + logging. If the mic is muted while hidden, look at WebKit's capture-interruption settings |
+| Memory error, dead Continue | 06 automatic reload |
+| Artifact / Doc links "browser not supported" | 06 covers the shell only. Next: inject the compatibility layer into `*.frame.claudeusercontent.com` frames (user scripts with `forMainFrameOnly:NO`, host-guarded; evaluate with `evaluateJavaScript:inFrame:` or in-frame nonce; separate, narrower bridge for those frames) |
+| Long-press copy | 06 restores link menu and text selection; confirm on device |
+
+## Sign-in bookmarklet (Safari)
+
+Add a bookmark in Safari, edit it, set its address to:
+
+```
+javascript:location.href='claudelegacy://'+location.host+location.pathname+location.search+location.hash
+```
+
+When claude.ai's email link opens in Safari and fails, open Bookmarks and tap it:
+the app opens and asks before loading the same claude.ai address.
+
+## Docs
+
+- Improvement brief (Logan's requirements, 30 Oct 2026):
+  https://claude.ai/artifact/3nmgWJ7EAbMikizsDSEx9Y
+- Project inbox (ideas from Logan's voice chats; read first, act on open items,
+  tick them off): https://claude.ai/artifact/VcaRgz43vtd9hahbt67hwJ

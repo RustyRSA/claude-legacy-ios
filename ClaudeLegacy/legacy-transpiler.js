@@ -27,7 +27,11 @@ var LegacyTranspiler = (() => {
     init: () => init,
     loadCode: () => loadCode,
     onExportsUpdated: () => onExportsUpdated,
-    transpile: () => transpile
+    pruneCache: () => pruneCache,
+    releaseUnused: () => releaseUnused,
+    stats: () => stats,
+    transpile: () => transpile,
+    usedModules: () => usedModules
   });
 
   // node_modules/acorn/dist/acorn.mjs
@@ -8367,42 +8371,360 @@ var LegacyTranspiler = (() => {
     }
     return "".concat(BASE_URL, "/").concat(source.replace(/^\.\//, ""));
   };
+  // ---- Module loading -------------------------------------------------------
+  // App changes (round 6). Classic mode is the original behaviour: one module at
+  // a time, read from the cache or downloaded and transpiled on the page's main
+  // thread. Fast mode (options.fast) keeps the same execution order but:
+  //  - opens the cache once instead of once per module;
+  //  - reads every module the last launch used from the cache in parallel, as
+  //    soon as the page starts (options.manifest);
+  //  - downloads and transpiles cache misses in background workers, and asks for
+  //    a module's imports as soon as its code is known instead of when the
+  //    importing module reaches them;
+  //  - stores compact (minified) output in its own cache and removes caches and
+  //    entries that are no longer used, so storage does not fill up.
+  // Timings for every module are kept for the app's debug log (stats()).
   var CACHE_NAME = "transpiled-v".concat(version2);
-  async function openCache() {
-    if (typeof caches === "undefined") return null;
+  var FAST_CACHE_NAME = "transpiled-fast-v".concat(version2, "-1");
+  var DEPS_PREFIX = "//@deps ";
+  var _cachePromise = null;
+  var _pending = /* @__PURE__ */ new Map();
+  var _records = /* @__PURE__ */ new Map();
+  var _order = [];
+  var _stats = {
+    startedAt: 0,
+    hits: 0,
+    misses: 0,
+    prefetched: 0,
+    prefetchUsed: 0,
+    workerJobs: 0,
+    mainJobs: 0,
+    transpileMs: 0,
+    fetchMs: 0,
+    readMs: 0,
+    putFailures: 0,
+    putError: "",
+    workers: 0,
+    workerError: "",
+    pruned: 0,
+    cachesRemoved: 0
+  };
+  function nowMs() {
+    return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+  }
+  function isFast() {
+    return !!(options && options.fast);
+  }
+  function record(src) {
+    let r = _records.get(src);
+    if (!r) {
+      r = { src, requestedAt: nowMs() };
+      _records.set(src, r);
+      _order.push(r);
+    }
+    return r;
+  }
+  function openCache() {
+    if (_cachePromise && isFast()) return _cachePromise;
+    const name = isFast() ? FAST_CACHE_NAME : CACHE_NAME;
+    const opening = (async () => {
+      if (typeof caches === "undefined") return null;
+      try {
+        return await caches.open(name);
+      } catch {
+        return null;
+      }
+    })();
+    if (isFast()) _cachePromise = opening;
+    return opening;
+  }
+  function depsOf(code) {
+    if (code.indexOf(DEPS_PREFIX, 0) < 0) return [];
+    const start = code.indexOf(DEPS_PREFIX);
+    if (start > 64) return [];
+    const end = code.indexOf("\n", start);
+    const line = code.slice(start + DEPS_PREFIX.length, end < 0 ? void 0 : end).trim();
+    return line ? line.split(" ").map((s) => resolveModule(s)) : [];
+  }
+  function warm(list) {
+    for (const src of list) {
+      if (!src || src.includes("intercom") || loaded.has(src) || _pending.has(src)) continue;
+      const p = obtainCode(src, true);
+      _pending.set(src, p);
+      // A failed head start is simply retried when the module is really needed.
+      p.catch(() => {
+        if (_pending.get(src) === p) _pending.delete(src);
+      });
+    }
+  }
+  async function readFromCache(src) {
+    const cache = await openCache();
+    if (!cache) return null;
     try {
-      return await caches.open(CACHE_NAME);
+      const t0 = nowMs();
+      const hit = await cache.match(src);
+      if (!hit) return null;
+      const code = await hit.text();
+      _stats.readMs += nowMs() - t0;
+      return code;
     } catch {
       return null;
     }
+  }
+  function storeInCache(src, code) {
+    openCache().then((cache) => {
+      if (!cache) return;
+      cache.put(src, new Response(code)).catch((e) => {
+        _stats.putFailures += 1;
+        _stats.putError = String(e && e.name || e);
+      });
+    });
+  }
+  // Fast mode: everything needed to get one module's transpiled code.
+  async function obtainCode(src, speculative) {
+    const cached = await readFromCache(src);
+    if (cached !== null) {
+      _stats.hits += 1;
+      warm(depsOf(cached));
+      return { code: cached, how: "cache" };
+    }
+    if (speculative === "cache-only") return null;
+    _stats.misses += 1;
+    let out = null;
+    const job = workerTranspile(src);
+    if (job) {
+      try {
+        out = await job;
+        _stats.workerJobs += 1;
+      } catch {
+        out = null;
+      }
+    }
+    if (!out) {
+      const t0 = nowMs();
+      const r = await fetch(src);
+      const code = await r.text();
+      const t1 = nowMs();
+      out = { code: transpile(src, code), fetchMs: t1 - t0, transpileMs: nowMs() - t1 };
+      _stats.mainJobs += 1;
+    }
+    _stats.fetchMs += out.fetchMs || 0;
+    _stats.transpileMs += out.transpileMs || 0;
+    storeInCache(src, out.code);
+    warm(depsOf(out.code));
+    return { code: out.code, how: job ? "worker" : "main" };
+  }
+  // ---- Background transpiling ----------------------------------------------
+  var _workers = null;
+  var _workerQueue = [];
+  var _workerJobs = /* @__PURE__ */ new Map();
+  var _nextJob = 1;
+  function startWorkers() {
+    if (_workers !== null) return _workers;
+    _workers = [];
+    try {
+      if (!options.workerSource || typeof Worker === "undefined" || typeof Blob === "undefined") {
+        _stats.workerError = "unavailable";
+        return _workers;
+      }
+      const url = URL.createObjectURL(new Blob([options.workerSource], { type: "text/javascript" }));
+      const count = Math.max(1, Math.min(4, options.workerCount || 2));
+      for (let i = 0; i < count; i++) {
+        const worker = new Worker(url);
+        const slot = { worker, busy: null };
+        worker.onmessage = (event) => finishJob(slot, event.data);
+        worker.onerror = (event) => {
+          _stats.workerError = String(event && event.message || "worker error");
+          if (event && event.preventDefault) event.preventDefault();
+          failSlot(slot);
+        };
+        worker.postMessage({
+          type: "init",
+          options: { BASE_URL: options.BASE_URL, target: options.target, minify: true }
+        });
+        _workers.push(slot);
+      }
+      _stats.workers = _workers.length;
+      options.workerSource = null; // the workers have their copy
+
+    } catch (e) {
+      _stats.workerError = String(e && e.message || e);
+      _workers = [];
+    }
+    return _workers;
+  }
+  function workerTranspile(src) {
+    const slots = startWorkers();
+    if (!slots.length) return null;
+    return new Promise((resolve, reject) => {
+      const job = { id: _nextJob++, src, resolve, reject };
+      _workerJobs.set(job.id, job);
+      _workerQueue.push(job);
+      pumpWorkers();
+    });
+  }
+  function pumpWorkers() {
+    for (const slot of _workers || []) {
+      if (slot.busy || slot.dead || !_workerQueue.length) continue;
+      // Modules something is already waiting for go first.
+      let index = _workerQueue.findIndex((j) => _records.has(j.src));
+      if (index < 0) index = 0;
+      const job = _workerQueue.splice(index, 1)[0];
+      slot.busy = job;
+      // A worker that never answers must not hold the page up: after 20 s the
+      // job is done on the page instead and that worker is retired.
+      job.timer = setTimeout(() => {
+        if (slot.busy !== job) return;
+        _stats.workerError = "worker timed out";
+        try {
+          slot.worker.terminate();
+        } catch {
+        }
+        failSlot(slot);
+      }, 2e4);
+      slot.worker.postMessage({ type: "job", id: job.id, src: job.src });
+    }
+  }
+  function finishJob(slot, data) {
+    const job = slot.busy;
+    slot.busy = null;
+    if (job) clearTimeout(job.timer);
+    if (job && data && data.id === job.id) {
+      _workerJobs.delete(job.id);
+      if (typeof data.code === "string") job.resolve(data);
+      else job.reject(new Error(data.error || "worker failed"));
+    }
+    pumpWorkers();
+  }
+  function failSlot(slot) {
+    slot.dead = true;
+    const job = slot.busy;
+    slot.busy = null;
+    if (job) clearTimeout(job.timer);
+    if (job) {
+      _workerJobs.delete(job.id);
+      job.reject(new Error("worker stopped"));
+    }
+    if ((_workers || []).every((s) => s.dead)) {
+      for (const queued of _workerQueue.splice(0)) queued.reject(new Error("no workers"));
+    }
+    pumpWorkers();
+  }
+  // ---- Housekeeping ----------------------------------------------------------
+  // Keeps the cache to what the last few launches used. Old builds of claude.ai
+  // otherwise pile up until the storage quota is reached and new entries stop
+  // being saved, which would make every launch transpile again.
+  function pruneCache(keep) {
+    if (typeof caches === "undefined") return;
+    caches.keys().then((names) => {
+      for (const name of names) {
+        if (name.startsWith("transpiled") && name !== FAST_CACHE_NAME) {
+          caches.delete(name).then((ok) => {
+            if (ok) _stats.cachesRemoved += 1;
+          });
+        }
+      }
+    }).catch(() => void 0);
+    if (!keep || !keep.length) return;
+    const keepSet = new Set(keep);
+    openCache().then(async (cache) => {
+      if (!cache) return;
+      for (const request of await cache.keys()) {
+        if (!keepSet.has(request.url)) {
+          await cache.delete(request);
+          _stats.pruned += 1;
+        }
+      }
+    }).catch(() => void 0);
+  }
+  function stats() {
+    return {
+      stats: Object.assign({}, _stats),
+      modules: _order.map((r) => Object.assign({}, r))
+    };
+  }
+  function usedModules() {
+    return _order.map((r) => r.src);
   }
   async function loadCode(src = "") {
     if (src.includes("intercom") || loaded.has(src)) {
       return;
     }
     loaded.add(src);
+    const rec = record(src);
+    if (isFast()) {
+      let pending = _pending.get(src);
+      let result = null;
+      if (pending) {
+        try {
+          result = await pending;
+        } catch {
+          result = null;
+        }
+      }
+      if (pending && result) _stats.prefetchUsed += 1;
+      if (!result) result = await obtainCode(src, false);
+      _pending.delete(src);
+      rec.codeAt = nowMs();
+      rec.how = result.how;
+      rec.bytes = result.code.length;
+      options.runScript(result.code, src);
+      rec.ranAt = nowMs();
+      return;
+    }
     const cache = await openCache();
     if (cache) {
       const cached = await cache.match(src);
       if (cached) {
         console.log("[cache hit]", src);
+        rec.codeAt = nowMs();
+        rec.how = "cache";
+        _stats.hits += 1;
         options.runScript(await cached.text(), src);
+        rec.ranAt = nowMs();
         return;
       }
     }
     console.warn("[cache miss]", src);
+    _stats.misses += 1;
     const r = await fetch(src);
     const code = await r.text();
     const patchedScript = transpile(src, code);
     if (cache) {
       cache.put(src, new Response(patchedScript));
     }
+    rec.codeAt = nowMs();
+    rec.how = "main";
     options.runScript(patchedScript, src);
+    rec.ranAt = nowMs();
   }
   function init(o) {
     options = o;
+    _stats.startedAt = nowMs();
+    if (isFast()) {
+      startWorkers();
+      // Read what the last launch used, without downloading anything for it:
+      // after a claude.ai update most of those files are no longer requested.
+      for (const src of options.manifest || []) {
+        if (typeof src !== "string" || _pending.has(src) || loaded.has(src)) continue;
+        const p = obtainCode(src, "cache-only");
+        _pending.set(src, p);
+        p.then((res) => {
+          if (res) _stats.prefetched += 1;
+          else if (_pending.get(src) === p && !loaded.has(src)) _pending.delete(src);
+        });
+      }
+    }
+  }
+  // Prefetched code that this launch never asked for is released.
+  function releaseUnused() {
+    for (const src of Array.from(_pending.keys())) {
+      if (!loaded.has(src)) _pending.delete(src);
+    }
   }
   function exportModule(source, exports) {
+    const done = _records.get(source);
+    if (done && done.doneAt === void 0) done.doneAt = nowMs();
     console.log("[exportModule] ".concat(source, " \u2192"), exports);
     if (_moduleExports[source]) {
       Object.assign(_moduleExports[source], exports);
@@ -8469,6 +8791,12 @@ var LegacyTranspiler = (() => {
       sourceType: "module",
       allowAwaitOutsideFunction: true
     });
+    const deps = [];
+    for (const node of ast.body) {
+      if (node.type === "ImportDeclaration" && node.specifiers.length > 0 && typeof node.source.value === "string") {
+        deps.push(node.source.value);
+      }
+    }
     transformStaticImports(ast, src);
     const visitors = [
       createDynamicImportsVisitor(src),
@@ -8495,7 +8823,10 @@ var LegacyTranspiler = (() => {
     transformExports(ast, { src });
     transformWrapAsyncIIFE(ast);
     const result = generate(ast, options.minify ? { indent: "", lineEnd: "" } : void 0);
-    return "'use strict';\n".concat(result);
+    // The second line lists the module's static imports, so a loader holding only
+    // this text can start fetching them before the module runs (see warm()).
+    const depsLine = deps.length ? DEPS_PREFIX + deps.filter((d) => !/\s/.test(d)).join(" ") + "\n" : "";
+    return "'use strict';\n".concat(depsLine, result);
   }
   return __toCommonJS(index_exports);
 })();
