@@ -146,6 +146,14 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 - Fix: `app-tweaks.js` makes `IDBTransaction.prototype.commit` a no-op (a
   transaction commits by itself once it has no requests left); count in the log.
 - Also: app crash 13:28 = camera access without `NSCameraUsageDescription`; added.
+- Result (log 8, 18:03, round 8b on macos-14): 12 commit() calls skipped; no failed
+  requests (all 14 launch calls 200), no IndexedDB "state read rejected", send button
+  shows after the first keystroke. New: the app's probe database got QuotaExceededError
+  ("not enough space for domain") while claude.ai's 3 databases work, so claude.ai's
+  storage is near its quota. Chat open: address +62 ms, data +1469 ms but the request
+  itself 372 ms (about 1.1 s before it starts), settled +2.2 s. Main thread blocked 1.2 s
+  at start and 0.5–1.0 s at 11–17 s. Read-ahead still 800 modules: claude.ai asks for
+  ~800 within 6 s, so BOOT_MS 6000 does not trim it.
 - Crash reports can be pulled with: `scp "root@<phone>:/var/mobile/Library/Logs/CrashReporter/*<date>*" <folder>`.
 
 ### Round 08 (5 Nov 2026)
