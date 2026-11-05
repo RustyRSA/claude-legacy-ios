@@ -134,6 +134,14 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | `312d524` | 07a | Packs in CacheStorage (failed: quota full) |
 | (next) | 07 | Launch: app module store outside claude.ai's storage, batched reads (see Loader) |
 
+### Round 09 (5 Nov 2026)
+- Debug log: `storage on disk` (native: Library/WebKit and Library/Caches folders of
+  0.5 MB or more, 4 levels) to find what fills claude.ai's quota; page side lists
+  IndexedDB names/versions, web cache names, local storage size.
+- Chat opens: modules loaded between tap and data (transpiled, slowest wait) and
+  main-thread time blocked in that window.
+- Read-ahead cut-off `BOOT_MS` 6000 -> 2500 ms.
+
 ### Round 08b (5 Nov 2026) — networking process crash found
 - Phone crash reports (`/var/mobile/Library/Logs/CrashReporter`): 15 of 15
   `com.apple.WebKit.Networking` crashes on 5 Nov (first 13:39) are the same:

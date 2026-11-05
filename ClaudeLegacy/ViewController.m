@@ -829,12 +829,77 @@ API_AVAILABLE(ios(14.0))
     NSArray *recent = events.count > 60 ? [events subarrayWithRange:NSMakeRange(events.count - 60, 60)] : events;
 
     return [NSString stringWithFormat:@"iOS %ld.%ld.%ld, app %@, mic permission %@, audio %@, background audio %@, cookie flush %@\n"
+            "storage on disk (folders of 0.5 MB or more):\n%@\n"
             "app events (latest last):\n%@\n----",
             (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion,
             appVersion ?: @"?", micPermission, [self audioRouteSummary],
             [[NSBundle.mainBundle objectForInfoDictionaryKey:@"UIBackgroundModes"] containsObject:@"audio"] ? @"yes" : @"no",
             canFlush ? @"available" : @"not available",
+            [self storageSummary],
             recent.count ? [recent componentsJoinedByString:@"\n"] : @"(none)"];
+}
+
+/// Sizes of the folders WebKit keeps website data in (IndexedDB, CacheStorage,
+/// local storage, its network cache) and of the app's module store, to see what
+/// fills claude.ai's storage quota. Folder names only, never file contents.
+- (NSString *)storageSummary {
+    NSURL *library = [[NSFileManager.defaultManager URLsForDirectory:NSLibraryDirectory
+                                                           inDomains:NSUserDomainMask] firstObject];
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *top in @[@"WebKit", @"Caches"]) {
+        [self addFolderSizes:[library URLByAppendingPathComponent:top isDirectory:YES]
+                        name:top
+                       depth:0
+                        into:lines];
+    }
+    return lines.count ? [lines componentsJoinedByString:@"\n"] : @"  (nothing)";
+}
+
+/// Adds "name size" for this folder (before its subfolders) when it holds 0.5 MB
+/// or more, going four levels down; returns the folder's size in bytes.
+- (long long)addFolderSizes:(NSURL *)folder
+                       name:(NSString *)name
+                      depth:(NSInteger)depth
+                       into:(NSMutableArray<NSString *> *)lines
+{
+    NSArray<NSURL *> *children = [NSFileManager.defaultManager contentsOfDirectoryAtURL:folder
+                                                           includingPropertiesForKeys:@[NSURLIsDirectoryKey, NSURLTotalFileAllocatedSizeKey]
+                                                                              options:0
+                                                                                error:nil];
+    NSUInteger insertAt = lines.count;
+    long long total = 0;
+    for (NSURL *child in children) {
+        id isDirectory = nil;
+        [child getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+        if ([isDirectory boolValue]) {
+            NSString *childName = [name stringByAppendingFormat:@"/%@", child.lastPathComponent];
+            total += depth < 4
+                ? [self addFolderSizes:child name:childName depth:depth + 1 into:lines]
+                : [self sizeOfFolder:child];
+        } else {
+            id size = nil;
+            [child getResourceValue:&size forKey:NSURLTotalFileAllocatedSizeKey error:nil];
+            total += [size longLongValue];
+        }
+    }
+    if (total >= 512 * 1024 && lines.count < 40) {
+        [lines insertObject:[NSString stringWithFormat:@"  %@ %.1f MB", name, total / 1048576.0] atIndex:insertAt];
+    }
+    return total;
+}
+
+- (long long)sizeOfFolder:(NSURL *)folder {
+    NSDirectoryEnumerator *walk = [NSFileManager.defaultManager enumeratorAtURL:folder
+                                                     includingPropertiesForKeys:@[NSURLTotalFileAllocatedSizeKey]
+                                                                        options:0
+                                                                   errorHandler:nil];
+    long long total = 0;
+    for (NSURL *file in walk) {
+        id size = nil;
+        [file getResourceValue:&size forKey:NSURLTotalFileAllocatedSizeKey error:nil];
+        total += [size longLongValue];
+    }
+    return total;
 }
 
 /// Adds a line to the app's own event log, which survives reloads and launches.

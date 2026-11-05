@@ -10,7 +10,7 @@
   const HISTORY_KEY = "__appModuleHistory";
   // Set once the old web caches are gone (transpiled code now lives in the app).
   const MIGRATED_KEY = "__appStoreMigrated";
-  const BOOT_MS = 6000;
+  const BOOT_MS = 2500; // the send button shows at about 2.1 s
 
   const status = (payload) => {
     try {

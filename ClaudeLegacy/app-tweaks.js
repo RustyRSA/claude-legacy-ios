@@ -752,10 +752,27 @@
     if (chatOpen === c) chatOpen = null;
     var part = function (label, at) { return at ? label + " +" + Math.round(at - c.at) + " ms" : label + " (not seen)"; };
     var line = [part("address", c.routeAt), part("data", c.dataAt) + (c.apiMs ? " (request " + Math.round(c.apiMs) + " ms)" : ""),
-      part("screen settled", c.settledAt)].join(", ");
+      part("screen settled", c.settledAt)].join(", ") + chatOpenWork(c);
     chatOpens.push(line);
     if (chatOpens.length > 8) chatOpens.shift();
     record("chat", "opened a chat: " + line);
+  }
+  // What kept the page busy between the tap and the chat's data: modules
+  // claude.ai loaded for it (and how long the slowest waited for its code) and
+  // main-thread stalls.
+  function chatOpenWork(c) {
+    var end = c.dataAt || c.settledAt || performance.now();
+    var info = loaderStats();
+    var mods = info ? info.modules.filter(function (m) { return m.requestedAt >= c.at && m.requestedAt <= end; }) : [];
+    var transpiled = 0, longestWait = 0;
+    mods.forEach(function (m) {
+      if (m.how === "worker" || m.how === "main") transpiled++;
+      if (m.codeAt && m.codeAt - m.requestedAt > longestWait) longestWait = m.codeAt - m.requestedAt;
+    });
+    var blocked = 0;
+    stalls.forEach(function (g) { if (g.at >= c.at && g.at <= end) blocked += g.ms; });
+    return "; before the data: " + mods.length + " modules (" + transpiled + " transpiled, slowest waited " +
+      Math.round(longestWait) + " ms), main thread blocked " + Math.round(blocked) + " ms";
   }
   function chatSummary() {
     return chatOpens.length ? ["chat opens (latest last):"].concat(chatOpens.map(function (l) { return "  " + l; })) : [];
@@ -1236,7 +1253,9 @@
       };
       if (indexedDB.databases) {
         indexedDB.databases().then(function (list) {
-          record("idb", list.length + " databases on claude.ai");
+          record("idb", list.length + " databases on claude.ai: " + list.map(function (d) {
+            return String(d.name).slice(0, 40) + " v" + d.version;
+          }).join(", "));
         }, function (e) {
           record("idb", "database list failed: " + describe(e));
         });
@@ -1244,6 +1263,21 @@
     } catch (e) {
       done("failed: " + describe(e));
     }
+    try {
+      if (window.caches && caches.keys) {
+        caches.keys().then(function (names) {
+          record("idb", names.length + " web caches on claude.ai" + (names.length ? ": " + names.map(function (n) {
+            return String(n).slice(0, 40);
+          }).join(", ") : ""));
+        }, function () {});
+      }
+      var localChars = 0;
+      for (var i = 0; i < localStorage.length; i++) {
+        var key = localStorage.key(i);
+        localChars += key.length + String(localStorage.getItem(key) || "").length;
+      }
+      record("idb", "local storage " + localStorage.length + " entries, " + Math.round(localChars / 1024) + " K characters");
+    } catch (e) {}
   }
 
   // Apply the page size as soon as claude.ai's viewport tag is parsed, so the
