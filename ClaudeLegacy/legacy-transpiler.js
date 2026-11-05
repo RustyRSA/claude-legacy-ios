@@ -8890,7 +8890,8 @@ var LegacyTranspiler = (() => {
     options = o;
     _stats.startedAt = nowMs();
     if (isFast()) {
-      startWorkers();
+      // Workers start at the first module that needs transpiling (none on most
+      // launches), so they do not compete with the page for the processor.
       _stats.store = hasStore() ? "app" : "web";
       // The last launch's modules from the app's store, in the order used.
       if (hasStore()) startBatches(options.manifest || []);
@@ -8918,7 +8919,8 @@ var LegacyTranspiler = (() => {
   function exportModule(source, exports) {
     const done = _records.get(source);
     if (done && done.doneAt === void 0) done.doneAt = nowMs();
-    console.log("[exportModule] ".concat(source, " \u2192"), exports);
+    // Thousands of these at every launch: kept for classic mode only.
+    if (!isFast()) console.log("[exportModule] ".concat(source, " \u2192"), exports);
     if (_moduleExports[source]) {
       Object.assign(_moduleExports[source], exports);
     } else {
@@ -8955,7 +8957,7 @@ var LegacyTranspiler = (() => {
   }
   function importModule(source, importer) {
     source = resolveModule(source);
-    console.log("[importModule]", source);
+    if (!isFast()) console.log("[importModule]", source);
     if (_moduleFinalized.has(source)) {
       return Promise.resolve(_moduleExports[source]);
     }

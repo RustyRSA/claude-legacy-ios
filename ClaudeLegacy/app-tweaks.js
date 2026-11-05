@@ -27,6 +27,7 @@
   // Debug log
   // ---------------------------------------------------------------------------
   var MAX_LINES = 400;
+  var scriptsStartAt = window.performance ? performance.now() : 0; // the app's scripts start here
   var lines = [];
   var startedAt = Date.now();
   var patchStatus = { supportCheck: "not seen yet", pcmMode: "not seen yet" };
@@ -1018,6 +1019,14 @@
         ", cache saves failed " + s.putFailures + (s.putError ? " (" + s.putError + ")" : "") +
         ", old entries removed " + s.pruned + ", old caches removed " + s.cachesRemoved
     ];
+    var loader = window.__appLoader;
+    if (loader && loader.runTimes) {
+      var rt = loader.runTimes();
+      out.push("  main thread: app scripts " + Math.round(scriptsStartAt) + "–" + Math.round(loader.scriptReadyAt) +
+        " ms; claude.ai module code " + rt.count + " modules in " + Math.round(rt.ms) + " ms (longest " +
+        Math.round(rt.longest) + " ms " + rt.longestFile + "), " + rt.atParse + " of them in one go at " +
+        seconds(rt.atParseAt) + " taking " + Math.round(rt.atParseMs) + " ms");
+    }
     if (s.store) {
       var first = mods[0];
       out.push("  storage: " + (s.store === "app" ? "app files" : "web cache") + ", entry code ready " +

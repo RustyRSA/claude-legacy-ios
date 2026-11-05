@@ -144,6 +144,8 @@
   // store, modules are ready well before that, so until then they wait here,
   // in order.
   const waitingForParse = [];
+  // How long claude.ai's module code keeps the main thread busy (debug log).
+  const runTimes = { count: 0, ms: 0, longest: 0, longestFile: "", atParse: 0, atParseMs: 0, atParseAt: 0 };
   const afterParse = (run) => {
     if (document.readyState !== "loading" && !waitingForParse.length) {
       run();
@@ -152,7 +154,12 @@
     if (!waitingForParse.length) {
       const flush = () => {
         document.removeEventListener("DOMContentLoaded", flush);
-        for (const queued of waitingForParse.splice(0)) queued();
+        const queued = waitingForParse.splice(0);
+        const t0 = performance.now();
+        for (const next of queued) next();
+        runTimes.atParse += queued.length;
+        runTimes.atParseMs += performance.now() - t0;
+        runTimes.atParseAt = t0;
       };
       document.addEventListener("DOMContentLoaded", flush);
       if (document.readyState !== "loading") setTimeout(flush, 0);
@@ -208,7 +215,15 @@
         }
         let ran = false;
         if (inPage) {
+          const t0 = performance.now();
           ran = runInPage(code, src);
+          const ms = performance.now() - t0;
+          runTimes.count += 1;
+          runTimes.ms += ms;
+          if (ms > runTimes.longest) {
+            runTimes.longest = ms;
+            runTimes.longestFile = shortName(src);
+          }
           if (!ran) {
             inPage = false;
             status({ stage: "inline-refused", file: shortName(src) });
@@ -239,6 +254,8 @@
     inPage: () => inPage,
     inlineRuns: () => inlineRuns,
     hasNonce: () => !!findNonce(),
+    runTimes: () => Object.assign({}, runTimes),
+    scriptReadyAt: performance.now(),
   };
 
   // ---- Remembering what this launch used --------------------------------------

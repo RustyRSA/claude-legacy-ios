@@ -134,6 +134,13 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | `312d524` | 07a | Packs in CacheStorage (failed: quota full) |
 | (next) | 07 | Launch: app module store outside claude.ai's storage, batched reads (see Loader) |
 
+### Round 11 (5 Nov 2026) — launch freezes
+- Log 10: main thread blocked 1.2 s at 0.0 s, 0.6 s at 1.5 s, 0.9 s at 3.4 s.
+- Workers start at the first module that needs transpiling (none on most launches)
+  instead of at init; no per-module console logs in fast mode (thousands per launch).
+- Debug log `main thread:` line: when the app scripts ran, claude.ai module code count
+  and total run time, longest module, and how many ran in one go when parsing ended.
+
 ### Round 10 (5 Nov 2026)
 - Log 9 storage report: `Library/Caches/WebKit/CacheStorage` 1,996 MB although claude.ai
   has 0 web caches: the old transpiled caches, deleted while the networking process kept
