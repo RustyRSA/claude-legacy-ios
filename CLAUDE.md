@@ -140,6 +140,13 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   instead of at init; no per-module console logs in fast mode (thousands per launch).
 - Debug log `main thread:` line: when the app scripts ran, claude.ai module code count
   and total run time, longest module, and how many ran in one go when parsing ended.
+- Result (log 11, 18:29): app scripts 4–13 ms (not the cause); claude.ai module code
+  831 modules in 1,436 ms on the main thread (longest 56 ms), only 1 at parse end, so
+  the 1.2 s block at 0.0 s is claude.ai's boot code being compiled and run, chained
+  through promise callbacks without a break. Send button 2.0–2.3 s; API calls start at
+  1.1 s once that code has run. Floor for this design: inline scripts get no bytecode
+  cache. Bigger gains would need native module loading (import maps are iOS 16.4+, so
+  not available) or the native chat list from the UI strategy.
 
 ### Round 10 (5 Nov 2026)
 - Log 9 storage report: `Library/Caches/WebKit/CacheStorage` 1,996 MB although claude.ai
