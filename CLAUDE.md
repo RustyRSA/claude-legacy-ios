@@ -142,6 +142,11 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   entry code ready, batches, modules moved, store size, errors.
 - First launch after installing moves modules over and frees the web storage at 45 s;
   the gain shows from the second launch.
+- 7b second launch (log 4): entry code ready 0.1 s (was 5.7 s), all 262 modules from
+  the store, last module 1.0 s; but claude.ai failed ("Root element #root not found"):
+  modules ran before the HTML was parsed (1.1 s). 7c: `patch.js` holds module runs
+  until DOMContentLoaded, as a browser does for module scripts. (`ranAt` in the log is
+  when a module was handed over, not when it ran.)
 
 ### Round 06 (30 Oct 2026)
 - Fast loading (loader above) with in-page nonce execution; Advanced menu toggle.

@@ -14,9 +14,11 @@ const SOURCES = {
   "a.js": 'log("a");export const a="A";',
 };
 
-function page(runScripts, settings) {
+function page(runScripts, settings, parsing) {
   const dom = new JSDOM("<!doctype html><html><head></head><body></body></html>", { runScripts, url: "https://claude.ai/artifact/x" });
   const w = dom.window;
+  // The HTML still being parsed, as when modules come from the app's store.
+  if (parsing) Object.defineProperty(w.document, "readyState", { configurable: true, get: () => parsing.state });
   const order = [], statuses = [], viaApp = [];
   w.log = (x) => order.push(x);
   w.iosVersion = "16.3";
@@ -59,6 +61,15 @@ function page(runScripts, settings) {
   const classic = await page("dangerously", { fastLoad: false });
   assert.strictEqual(classic.order.join(","), "a,shell:A");
   assert.strictEqual(classic.viaApp.join(","), "frame-shell-T1.js,a.js", "classic runs through the app");
+
+  // Modules ready before the HTML is parsed wait for it, then run in order.
+  const parsing = { state: "loading" };
+  const early = await page("dangerously", { fastLoad: true }, parsing);
+  assert.strictEqual(early.order.join(","), "", "nothing runs while the HTML is parsed");
+  parsing.state = "interactive";
+  early.w.document.dispatchEvent(new early.w.Event("DOMContentLoaded"));
+  await new Promise((r) => setTimeout(r, 100));
+  assert.strictEqual(early.order.join(","), "a,shell:A", "runs once parsed: " + early.order);
 
   console.log("PATCH PASS");
   process.exit(0);

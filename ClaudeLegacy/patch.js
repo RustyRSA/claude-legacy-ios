@@ -138,6 +138,27 @@
     return false; // refused by the page's security policy
   };
 
+  // A browser runs module scripts only once the page's HTML is parsed, and
+  // claude.ai's entry expects that (it mounts into #root). Read from the app's
+  // store, modules are ready well before that, so until then they wait here,
+  // in order.
+  const waitingForParse = [];
+  const afterParse = (run) => {
+    if (document.readyState !== "loading" && !waitingForParse.length) {
+      run();
+      return;
+    }
+    if (!waitingForParse.length) {
+      const flush = () => {
+        document.removeEventListener("DOMContentLoaded", flush);
+        for (const queued of waitingForParse.splice(0)) queued();
+      };
+      document.addEventListener("DOMContentLoaded", flush);
+      if (document.readyState !== "loading") setTimeout(flush, 0);
+    }
+    waitingForParse.push(run);
+  };
+
   const runThroughApp = (code, src) => {
     window.webkit.messageHandlers.patchScript.postMessage({
       code: code,
@@ -179,7 +200,7 @@
       migrate: migrate,
       workerSource: FAST ? window.__appWorkerSource : undefined,
       workerCount: 2,
-      runScript: (code, src) => {
+      runScript: (code, src) => afterParse(() => {
         // app-tweaks.js: targeted fixes to claude.ai modules (voice mode on old iOS).
         if (typeof window.__appPatchModule === "function") {
           code = window.__appPatchModule(code, shortName(src));
@@ -198,7 +219,7 @@
           runThroughApp(code, src);
         }
         scheduleReadyCheck();
-      },
+      }),
       target: {
         platform: 'iOS',
         version: iosVersion
