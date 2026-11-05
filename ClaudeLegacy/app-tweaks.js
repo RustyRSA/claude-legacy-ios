@@ -1157,7 +1157,7 @@
   // claude.ai's box, so claude.ai still does the work, and its menus open where the
   // app's buttons are. Controls are found by their labels; when one is missing,
   // nothing is hidden (ready: false) and the app shows claude.ai's own controls.
-  var NATIVE_CHROME = settings.nativeChrome === true;
+  var NATIVE_CHROME = !!settings.nativeChrome; // true or 1 from the app
   var chromeState = { ready: false, why: "not started" };
   var chromeSent = "";
   var EDITOR = '[contenteditable="true"][aria-label="Write your prompt to Claude"]';

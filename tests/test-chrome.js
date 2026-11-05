@@ -15,7 +15,7 @@ function page(html, url) {
   const posted = [];
   const clicks = [];
   w.webkit = { messageHandlers: { chrome: { postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) }, appearance: { postMessage() {} } } };
-  w.__appSettings = { nativeChrome: true };
+  w.__appSettings = { nativeChrome: 1 }; // as the app's JSON may send it
   w.document.addEventListener("click", (e) => clicks.push(e.target.getAttribute("aria-label") || e.target.getAttribute("href")), true);
   w.document.execCommand = (cmd, ui, text) => { w.__typed = text; return true; };
   w.eval(src);

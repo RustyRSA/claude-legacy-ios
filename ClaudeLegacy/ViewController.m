@@ -1051,7 +1051,8 @@ API_AVAILABLE(ios(15.0))
         @"fastLoad": @(SettingBool(kFastLoadKey, YES)),
         @"tapFix": @(SettingBool(kTapFixKey, YES)),
         @"pageScale": @(PageScaleSetting()),
-        @"nativeChrome": @(self.nativeChrome != nil && SettingBool(kNativeChromeKey, YES)),
+        // A BOOL, so it reaches the page as true/false (an int would arrive as 1).
+        @"nativeChrome": @((BOOL)(self.nativeChrome != nil && SettingBool(kNativeChromeKey, YES))),
     };
     NSData *json = [NSJSONSerialization dataWithJSONObject:settings options:0 error:nil];
     if (json == nil) {
