@@ -265,10 +265,12 @@ API_AVAILABLE(ios(14.0))
                     }
                     continue;
                 }
-                NSNumber *size = nil;
+                id size = nil;
                 [entry getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
                 count += 1;
-                bytes += size.longLongValue;
+                if ([size isKindOfClass:NSNumber.class]) {
+                    bytes += [(NSNumber *)size longLongValue];
+                }
             }
             reply(@{@"removed": @(removed), @"files": @(count), @"bytes": @(bytes)}, nil);
         });
