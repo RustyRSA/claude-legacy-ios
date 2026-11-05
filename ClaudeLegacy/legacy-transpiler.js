@@ -21,7 +21,6 @@ var LegacyTranspiler = (() => {
   // src/index.ts
   var index_exports = {};
   __export(index_exports, {
-    buildPacks: () => buildPacks,
     exportModule: () => exportModule,
     getModuleExports: () => getModuleExports,
     importModule: () => importModule,
@@ -8385,26 +8384,24 @@ var LegacyTranspiler = (() => {
   //  - stores compact (minified) output in its own cache and removes caches and
   //    entries that are no longer used, so storage does not fill up.
   // Timings for every module are kept for the app's debug log (stats()).
-  // Round 7: on iOS every cache read has a large fixed cost, so ~700 separate
-  // reads at boot kept the entry module waiting for seconds. The modules a
-  // launch runs first are now also stored as a few large "packs" in a small
-  // cache of their own (buildPacks), read in launch order at boot, and cache
-  // reads go through a queue where modules the page is waiting for go first.
+  // Round 7: claude.ai's web storage was the bottleneck. Opening it took 5.5 s
+  // on the phone, every read has a large fixed cost, and the transpiled code
+  // filled its quota (saves failing, claude.ai's own IndexedDB refused). When
+  // the app offers its module store (options.store: files in the app's own
+  // folder, outside that quota), fast mode keeps modules there instead: the
+  // modules the last launch used are read in launch order, BATCH_SIZE per
+  // request; on a miss the old web cache is read once (options.migrate) and
+  // housekeeping then deletes the web caches. Without the store (iOS 13) the
+  // web cache is used as before. All reads go through a queue where modules the
+  // page is waiting for go first.
   var CACHE_NAME = "transpiled-v".concat(version2);
   var FAST_CACHE_NAME = "transpiled-fast-v".concat(version2, "-1");
-  var PACK_CACHE_NAME = FAST_CACHE_NAME + "-packs";
-  var PACK_ORIGIN = "https://claude-legacy.invalid/pack/";
-  var PACK_MAGIC = "//@pack 1\n";
-  var PACK_CHARS = 2e6;
-  var PACK_BOOT_MS = 1e4;
-  var PACK_WINDOW_MS = 2e4;
+  var BATCH_SIZE = 40;
   var READ_LIMIT = 6;
   var DEPS_PREFIX = "//@deps ";
   var _cachePromise = null;
-  var _packCachePromise = null;
-  var _packId = "";
-  var _packOf = /* @__PURE__ */ new Map();
-  var _packReads = [];
+  var _batchOf = /* @__PURE__ */ new Map();
+  var _batchReads = [];
   var _readQueue = [];
   var _readsActive = 0;
   var _pending = /* @__PURE__ */ new Map();
@@ -8427,22 +8424,29 @@ var LegacyTranspiler = (() => {
     workerError: "",
     pruned: 0,
     cachesRemoved: 0,
+    store: "",
     cacheOpenMs: 0,
-    packCacheOpenMs: 0,
-    packs: 0,
-    packsRead: 0,
-    packHits: 0,
-    packMs: 0,
-    firstPackAt: 0,
-    packError: "",
-    packsBuilt: 0,
-    packBuildMs: 0
+    batches: 0,
+    batchesRead: 0,
+    batchHits: 0,
+    batchMs: 0,
+    firstBatchAt: 0,
+    migrated: 0,
+    storeError: "",
+    storeFiles: 0,
+    storeBytes: 0
   };
   function nowMs() {
     return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
   }
   function isFast() {
     return !!(options && options.fast);
+  }
+  function hasStore() {
+    return isFast() && !!(options.store && typeof options.store.call === "function");
+  }
+  function storeCall(op, extra) {
+    return Promise.resolve().then(() => options.store.call(Object.assign({ op, dir: FAST_CACHE_NAME }, extra)));
   }
   function record(src) {
     let r = _records.get(src);
@@ -8453,13 +8457,17 @@ var LegacyTranspiler = (() => {
     }
     return r;
   }
+  // With the app's store, the web cache is only read to move modules over, and
+  // only while there may be something to move.
   function openCache() {
     if (_cachePromise && isFast()) return _cachePromise;
     const name = isFast() ? FAST_CACHE_NAME : CACHE_NAME;
     const opening = (async () => {
       if (typeof caches === "undefined") return null;
+      if (hasStore() && !options.migrate) return null;
       try {
         const t0 = nowMs();
+        if (hasStore() && !await caches.has(name)) return null;
         const cache = await caches.open(name);
         if (isFast()) _stats.cacheOpenMs = nowMs() - t0;
         return cache;
@@ -8470,25 +8478,10 @@ var LegacyTranspiler = (() => {
     if (isFast()) _cachePromise = opening;
     return opening;
   }
-  function openPackCache() {
-    if (_packCachePromise) return _packCachePromise;
-    _packCachePromise = (async () => {
-      if (typeof caches === "undefined") return null;
-      try {
-        const t0 = nowMs();
-        const cache = await caches.open(PACK_CACHE_NAME);
-        _stats.packCacheOpenMs = nowMs() - t0;
-        return cache;
-      } catch {
-        return null;
-      }
-    })();
-    return _packCachePromise;
-  }
-  // ---- Cache read queue ------------------------------------------------------
+  // ---- Read queue -------------------------------------------------------------
   // At most READ_LIMIT reads at a time, in order of priority: reads the page
-  // is waiting for (0), then packs (1), then head starts (2), each in the order
-  // asked. promoteRead moves a read to 0, also one not queued yet.
+  // is waiting for (0), then launch batches (1), then head starts (2), each in
+  // the order asked. promoteRead moves a read to 0, also one not queued yet.
   var _promoted = /* @__PURE__ */ new Set();
   function queuedRead(key, priority, task) {
     return new Promise((resolve, reject) => {
@@ -8520,136 +8513,59 @@ var LegacyTranspiler = (() => {
       });
     }
   }
-  // ---- Packs -----------------------------------------------------------------
-  // A pack is PACK_MAGIC followed by, per module: its address, a newline, the
-  // length of its code, a newline, then the code itself.
-  function packKey(id, index) {
-    return PACK_ORIGIN + id + "/" + index;
-  }
-  function parsePack(text) {
-    if (!text.startsWith(PACK_MAGIC)) return null;
-    const out = /* @__PURE__ */ new Map();
-    let pos = PACK_MAGIC.length;
-    while (pos < text.length) {
-      const a = text.indexOf("\n", pos);
-      const b = a < 0 ? -1 : text.indexOf("\n", a + 1);
-      if (b < 0) return null;
-      const length = Number(text.slice(a + 1, b));
-      if (!(length >= 0) || b + 1 + length > text.length) return null;
-      out.set(text.slice(pos, a), text.slice(b + 1, b + 1 + length));
-      pos = b + 1 + length;
-    }
-    return out;
-  }
-  function startPacks(index) {
-    if (!index || typeof index.id !== "string" || !Array.isArray(index.lists)) return;
-    _packId = index.id;
-    index.lists.forEach((list, i) => {
-      if (!Array.isArray(list)) return;
-      for (const src of list) {
-        if (typeof src === "string" && !_packOf.has(src)) _packOf.set(src, i);
+  // ---- The app's module store ------------------------------------------------
+  function startBatches(list) {
+    const srcs = list.filter((src) => typeof src === "string" && !src.includes("intercom"));
+    for (let i = 0; i * BATCH_SIZE < srcs.length; i++) {
+      const batch = srcs.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
+      for (const src of batch) {
+        if (!_batchOf.has(src)) _batchOf.set(src, i);
       }
-      _packReads[i] = readPack(i);
-      _stats.packs += 1;
-    });
+      _batchReads[i] = readBatch(i, batch);
+      _stats.batches += 1;
+    }
   }
-  async function readPack(i) {
-    const cache = await openPackCache();
-    if (!cache) return null;
+  async function readBatch(i, batch) {
     try {
-      return await queuedRead("pack:" + i, 1, async () => {
+      return await queuedRead("batch:" + i, 1, async () => {
         const t0 = nowMs();
-        const hit = await cache.match(packKey(_packId, i));
-        if (!hit) {
-          _stats.packError = "pack " + i + " missing";
-          return null;
-        }
-        const map = parsePack(await hit.text());
-        if (!map) {
-          _stats.packError = "pack " + i + " damaged";
-          return null;
-        }
-        _stats.packMs += nowMs() - t0;
-        _stats.packsRead += 1;
-        if (!_stats.firstPackAt) _stats.firstPackAt = nowMs();
+        const codes = await storeCall("get", { keys: batch });
+        const map = /* @__PURE__ */ new Map();
+        batch.forEach((src, j) => {
+          if (codes && typeof codes[j] === "string") map.set(src, codes[j]);
+        });
+        _stats.batchMs += nowMs() - t0;
+        _stats.batchesRead += 1;
+        if (!_stats.firstBatchAt) _stats.firstBatchAt = nowMs();
         return map;
       });
     } catch (e) {
-      _stats.packError = String(e && e.name || e);
+      _stats.storeError = String(e && e.message || e);
       return null;
     }
   }
-  // A module's code from its pack, or null (not packed, or the pack is gone).
-  // Code is handed out once, so the pack's memory goes as modules run.
-  async function readFromPack(src) {
-    const i = _packOf.get(src);
-    if (i === void 0 || !_packReads[i]) return null;
-    const map = await _packReads[i];
+  // A module's code from its launch batch, or null. Code is handed out once, so
+  // the batch's memory goes as modules run.
+  async function readFromBatch(src) {
+    const i = _batchOf.get(src);
+    if (i === void 0 || !_batchReads[i]) return null;
+    const map = await _batchReads[i];
     if (!map || !map.has(src)) return null;
     const code = map.get(src);
     map.delete(src);
-    _packOf.delete(src);
+    _batchOf.delete(src);
     return code;
   }
-  // Rewrites the packs from the modules this launch ran in its first
-  // PACK_WINDOW_MS, in the order they ran, when the current packs (index from
-  // the last build) miss any module run in the first PACK_BOOT_MS or hold far
-  // more than is used. Returns the new index for the app to keep, or null.
-  async function buildPacks(current) {
-    if (!isFast() || typeof caches === "undefined") return null;
-    const ran = _order.filter((r) => r.ranAt && !r.src.includes("intercom")).sort((a, b) => a.ranAt - b.ranAt);
-    const boot = ran.filter((r) => r.ranAt - _stats.startedAt <= PACK_BOOT_MS).map((r) => r.src);
-    const wanted = ran.filter((r) => r.ranAt - _stats.startedAt <= PACK_WINDOW_MS).map((r) => r.src);
-    if (!boot.length) return null;
-    const have = /* @__PURE__ */ new Set();
-    let total = 0;
-    if (current && Array.isArray(current.lists)) {
-      for (const list of current.lists) {
-        if (!Array.isArray(list)) continue;
-        for (const src of list) {
-          have.add(src);
-          total += 1;
-        }
-      }
-    }
-    if (current && current.id && !_stats.packError && boot.every((src) => have.has(src)) && total <= wanted.length * 2) {
-      return null;
-    }
-    const t0 = nowMs();
+  async function readFromStore(src, urgent) {
     try {
-      const cache = await openPackCache();
-      if (!cache) return null;
-      const id = String(Date.now());
-      const lists = [];
-      let list = [];
-      let parts = [PACK_MAGIC];
-      let size = 0;
-      const flush = async () => {
-        if (!list.length) return;
-        await cache.put(packKey(id, lists.length), new Response(parts.join("")));
-        lists.push(list);
-        list = [];
-        parts = [PACK_MAGIC];
-        size = 0;
-      };
-      for (const src of wanted) {
-        const code = await readFromCache(src, false);
-        if (code === null) continue;
-        list.push(src);
-        parts.push(src, "\n", String(code.length), "\n", code);
-        size += code.length;
-        if (size >= PACK_CHARS) await flush();
-      }
-      await flush();
-      if (!lists.length) return null;
-      for (const request of await cache.keys()) {
-        if (!request.url.startsWith(PACK_ORIGIN + id + "/")) await cache.delete(request);
-      }
-      _stats.packsBuilt = lists.length;
-      _stats.packBuildMs = nowMs() - t0;
-      return { id, lists };
+      return await queuedRead(src, urgent ? 0 : 2, async () => {
+        const t0 = nowMs();
+        const codes = await storeCall("get", { keys: [src] });
+        _stats.readMs += nowMs() - t0;
+        return codes && typeof codes[0] === "string" ? codes[0] : null;
+      });
     } catch (e) {
-      _stats.packError = "build: " + String(e && e.name || e);
+      _stats.storeError = String(e && e.message || e);
       return null;
     }
   }
@@ -8690,6 +8606,13 @@ var LegacyTranspiler = (() => {
     }
   }
   function storeInCache(src, code) {
+    if (hasStore()) {
+      storeCall("put", { key: src, code }).catch((e) => {
+        _stats.putFailures += 1;
+        _stats.putError = String(e && e.message || e);
+      });
+      return;
+    }
     openCache().then((cache) => {
       if (!cache) return;
       cache.put(src, new Response(code)).catch((e) => {
@@ -8700,9 +8623,21 @@ var LegacyTranspiler = (() => {
   }
   // Fast mode: everything needed to get one module's transpiled code.
   async function obtainCode(src, speculative) {
-    let cached = await readFromPack(src);
-    if (cached !== null) _stats.packHits += 1;
-    else cached = await readFromCache(src, !speculative);
+    let cached = await readFromBatch(src);
+    if (cached !== null) {
+      _stats.batchHits += 1;
+    } else if (hasStore()) {
+      cached = await readFromStore(src, !speculative);
+      if (cached === null) {
+        cached = await readFromCache(src, !speculative);
+        if (cached !== null) {
+          _stats.migrated += 1;
+          storeInCache(src, cached);
+        }
+      }
+    } else {
+      cached = await readFromCache(src, !speculative);
+    }
     if (cached !== null) {
       _stats.hits += 1;
       warm(depsOf(cached));
@@ -8834,11 +8769,31 @@ var LegacyTranspiler = (() => {
   // Keeps the cache to what the last few launches used. Old builds of claude.ai
   // otherwise pile up until the storage quota is reached and new entries stop
   // being saved, which would make every launch transpile again.
+  // With the app's store: unused files go, and every web cache this loader
+  // made goes (the returned promise settles once they are deleted).
   function pruneCache(keep) {
+    if (hasStore()) {
+      if (keep && keep.length) {
+        storeCall("prune", { keep }).then((r) => {
+          if (!r) return;
+          _stats.pruned = r.removed || 0;
+          _stats.storeFiles = r.files || 0;
+          _stats.storeBytes = r.bytes || 0;
+        }).catch((e) => {
+          _stats.storeError = String(e && e.message || e);
+        });
+      }
+      if (typeof caches === "undefined") return Promise.resolve();
+      return caches.keys().then((names) => Promise.all(names.filter((name) => name.startsWith("transpiled")).map(
+        (name) => caches.delete(name).then((ok) => {
+          if (ok) _stats.cachesRemoved += 1;
+        })
+      )));
+    }
     if (typeof caches === "undefined") return;
     caches.keys().then((names) => {
       for (const name of names) {
-        if (name.startsWith("transpiled") && name !== FAST_CACHE_NAME && name !== PACK_CACHE_NAME) {
+        if (name.startsWith("transpiled") && name !== FAST_CACHE_NAME) {
           caches.delete(name).then((ok) => {
             if (ok) _stats.cachesRemoved += 1;
           });
@@ -8878,7 +8833,7 @@ var LegacyTranspiler = (() => {
       if (pending) {
         // The page now waits for this one: its queued read goes first.
         promoteRead(src);
-        if (_packOf.has(src)) promoteRead("pack:" + _packOf.get(src));
+        if (_batchOf.has(src)) promoteRead("batch:" + _batchOf.get(src));
         try {
           result = await pending;
         } catch {
@@ -8926,8 +8881,9 @@ var LegacyTranspiler = (() => {
     _stats.startedAt = nowMs();
     if (isFast()) {
       startWorkers();
-      // Packs first: they hold the modules the last launch ran first.
-      startPacks(options.packs);
+      _stats.store = hasStore() ? "app" : "web";
+      // The last launch's modules from the app's store, in the order used.
+      if (hasStore()) startBatches(options.manifest || []);
       // Read what the last launch used, without downloading anything for it:
       // after a claude.ai update most of those files are no longer requested.
       for (const src of options.manifest || []) {
@@ -8946,8 +8902,8 @@ var LegacyTranspiler = (() => {
     for (const src of Array.from(_pending.keys())) {
       if (!loaded.has(src)) _pending.delete(src);
     }
-    _packOf.clear();
-    _packReads = [];
+    _batchOf.clear();
+    _batchReads = [];
   }
   function exportModule(source, exports) {
     const done = _records.get(source);

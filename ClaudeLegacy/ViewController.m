@@ -87,6 +87,199 @@ static NSString *ShortFingerprint(NSString *value) {
     return [NSString stringWithFormat:@"#%02x%02x%02x", digest[0], digest[1], digest[2]];
 }
 
+/// Messages are accepted only from claude.ai's own top-level page, see
+/// -isTrustedMessage:.
+static BOOL IsTrustedFrame(WKFrameInfo *frame) {
+    WKSecurityOrigin *origin = frame.securityOrigin;
+    return frame.isMainFrame
+        && [origin.protocol isEqualToString:@"https"]
+        && [origin.host.lowercaseString isEqualToString:@"claude.ai"]
+        && origin.port == 0;
+}
+
+#pragma mark - Module store
+
+/// Transpiled claude.ai modules, kept as files in the app's Caches folder
+/// instead of claude.ai's web storage (CacheStorage), whose quota they filled and
+/// which took seconds to open at every launch. The page asks through the
+/// "moduleStore" handler and gets an answer back (iOS 14 and later):
+///   {op: "get", dir, keys: [address, ...]} -> [code or null, ...]
+///   {op: "put", dir, key: address, code}   -> true
+///   {op: "prune", dir, keep: [address, ...]} -> {removed, files, bytes}
+/// dir names the transpiler version (one folder each; prune removes the
+/// others). A file is named by the SHA-256 of its https address, so no
+/// address can name a path. Only claude.ai's top-level page is answered.
+API_AVAILABLE(ios(14.0))
+@interface ModuleStore : NSObject <WKScriptMessageHandlerWithReply>
+@end
+
+@implementation ModuleStore {
+    dispatch_queue_t _queue;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        // Reads run side by side; writes and pruning run alone.
+        _queue = dispatch_queue_create("ClaudeLegacy.moduleStore", DISPATCH_QUEUE_CONCURRENT);
+    }
+    return self;
+}
+
++ (NSURL *)rootURL {
+    NSURL *caches = [[NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory
+                                                          inDomains:NSUserDomainMask] firstObject];
+    return [caches URLByAppendingPathComponent:@"transpiled-modules" isDirectory:YES];
+}
+
+/// The folder for one transpiler version, or nil for a name that is not plain.
++ (NSURL *)folderNamed:(id)name {
+    if (![name isKindOfClass:NSString.class]) {
+        return nil;
+    }
+    NSString *text = name;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                               @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"];
+    if (text.length == 0 || text.length > 64 || [text hasPrefix:@"."]
+        || [text rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) {
+        return nil;
+    }
+    return [[self rootURL] URLByAppendingPathComponent:text isDirectory:YES];
+}
+
+/// The file name for a module address, or nil if it is not an https address.
++ (NSString *)fileNameForKey:(id)key {
+    if (![key isKindOfClass:NSString.class]) {
+        return nil;
+    }
+    NSString *text = key;
+    if (![text hasPrefix:@"https://"] || text.length > 2048) {
+        return nil;
+    }
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *fileName = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2 + 3];
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
+        [fileName appendFormat:@"%02x", digest[i]];
+    }
+    [fileName appendString:@".js"];
+    return fileName;
+}
+
+- (void)userContentController:(WKUserContentController *)userContentController
+      didReceiveScriptMessage:(WKScriptMessage *)message
+                 replyHandler:(void (^)(id _Nullable reply, NSString * _Nullable errorMessage))replyHandler
+{
+    if (!IsTrustedFrame(message.frameInfo) || ![message.body isKindOfClass:NSDictionary.class]) {
+        replyHandler(nil, @"refused");
+        return;
+    }
+    NSDictionary *body = message.body;
+    NSString *op = [body[@"op"] isKindOfClass:NSString.class] ? body[@"op"] : @"";
+    NSURL *folder = [ModuleStore folderNamed:body[@"dir"]];
+    if (folder == nil) {
+        replyHandler(nil, @"bad folder name");
+        return;
+    }
+    void (^reply)(id, NSString *) = ^(id value, NSString *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            replyHandler(value, error);
+        });
+    };
+
+    if ([op isEqualToString:@"get"]) {
+        NSArray *keys = [body[@"keys"] isKindOfClass:NSArray.class] ? body[@"keys"] : @[];
+        dispatch_async(_queue, ^{
+            NSMutableArray *codes = [NSMutableArray arrayWithCapacity:keys.count];
+            for (id key in keys) {
+                NSString *fileName = [ModuleStore fileNameForKey:key];
+                NSString *code = nil;
+                if (fileName) {
+                    code = [NSString stringWithContentsOfURL:[folder URLByAppendingPathComponent:fileName]
+                                                    encoding:NSUTF8StringEncoding
+                                                       error:nil];
+                }
+                [codes addObject:code ? (id)code : (id)[NSNull null]];
+            }
+            reply(codes, nil);
+        });
+        return;
+    }
+
+    if ([op isEqualToString:@"put"]) {
+        NSString *fileName = [ModuleStore fileNameForKey:body[@"key"]];
+        id code = body[@"code"];
+        if (fileName == nil || ![code isKindOfClass:NSString.class]) {
+            replyHandler(nil, @"bad module");
+            return;
+        }
+        dispatch_barrier_async(_queue, ^{
+            NSError *error = nil;
+            [NSFileManager.defaultManager createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:nil];
+            BOOL ok = [(NSString *)code writeToURL:[folder URLByAppendingPathComponent:fileName]
+                                        atomically:YES
+                                          encoding:NSUTF8StringEncoding
+                                             error:&error];
+            reply(@(ok), ok ? nil : (error.localizedDescription ?: @"write failed"));
+        });
+        return;
+    }
+
+    if ([op isEqualToString:@"prune"]) {
+        NSArray *keep = [body[@"keep"] isKindOfClass:NSArray.class] ? body[@"keep"] : @[];
+        if (keep.count == 0) {
+            replyHandler(nil, @"empty keep list");
+            return;
+        }
+        dispatch_barrier_async(_queue, ^{
+            NSFileManager *files = NSFileManager.defaultManager;
+            NSMutableSet *keepNames = [NSMutableSet setWithCapacity:keep.count];
+            for (id key in keep) {
+                NSString *fileName = [ModuleStore fileNameForKey:key];
+                if (fileName) {
+                    [keepNames addObject:fileName];
+                }
+            }
+            // Folders of other transpiler versions go entirely.
+            NSArray<NSURL *> *folders = [files contentsOfDirectoryAtURL:[ModuleStore rootURL]
+                                             includingPropertiesForKeys:nil
+                                                                options:0
+                                                                  error:nil];
+            for (NSURL *other in folders) {
+                if (![other.lastPathComponent isEqualToString:folder.lastPathComponent]) {
+                    [files removeItemAtURL:other error:nil];
+                }
+            }
+            NSInteger removed = 0;
+            NSInteger count = 0;
+            long long bytes = 0;
+            NSArray<NSURL *> *entries = [files contentsOfDirectoryAtURL:folder
+                                             includingPropertiesForKeys:@[NSURLFileSizeKey]
+                                                                options:0
+                                                                  error:nil];
+            for (NSURL *entry in entries) {
+                if (![keepNames containsObject:entry.lastPathComponent]) {
+                    if ([files removeItemAtURL:entry error:nil]) {
+                        removed += 1;
+                    }
+                    continue;
+                }
+                NSNumber *size = nil;
+                [entry getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+                count += 1;
+                bytes += size.longLongValue;
+            }
+            reply(@{@"removed": @(removed), @"files": @(count), @"bytes": @(bytes)}, nil);
+        });
+        return;
+    }
+
+    replyHandler(nil, @"unknown operation");
+}
+
+@end
+
 @interface ViewController () <WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate, UIGestureRecognizerDelegate, WKHTTPCookieStoreObserver>
 
 @property (nonatomic) IBOutlet WKWebView *webView;
@@ -220,6 +413,11 @@ static NSString *ShortFingerprint(NSString *value) {
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"loadingStatus"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"appearance"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"appEvent"];
+    if (@available(iOS 14.0, *)) {
+        [self.webView.configuration.userContentController addScriptMessageHandlerWithReply:[[ModuleStore alloc] init]
+                                                                              contentWorld:WKContentWorld.pageWorld
+                                                                                      name:@"moduleStore"];
+    }
 
     [self.webView addObserver:self forKeyPath:@"estimatedProgress" options:0 context:NULL];
 
@@ -1586,12 +1784,7 @@ static NSString *ShortFingerprint(NSString *value) {
 /// and "patchScript" runs code in the page: without this check an embedded frame
 /// could run code with access to the signed-in claude.ai session.
 - (BOOL)isTrustedMessage:(WKScriptMessage *)message {
-    WKFrameInfo *frame = message.frameInfo;
-    WKSecurityOrigin *origin = frame.securityOrigin;
-    return frame.isMainFrame
-        && [origin.protocol isEqualToString:@"https"]
-        && [origin.host.lowercaseString isEqualToString:@"claude.ai"]
-        && origin.port == 0;
+    return IsTrustedFrame(message.frameInfo);
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController

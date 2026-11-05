@@ -8,7 +8,8 @@
   const FAST = settings.fastLoad !== false;
   const MANIFEST_KEY = "__appModuleManifest";
   const HISTORY_KEY = "__appModuleHistory";
-  const PACKS_KEY = "__appModulePacks";
+  // Set once the old web caches are gone (transpiled code now lives in the app).
+  const MIGRATED_KEY = "__appStoreMigrated";
 
   const status = (payload) => {
     try {
@@ -146,7 +147,8 @@
 
   try {
     let manifest = [];
-    let packs = null;
+    let store = null;
+    let migrate = false;
     if (FAST) {
       try {
         manifest = JSON.parse(localStorage.getItem(MANIFEST_KEY) || "[]");
@@ -154,10 +156,17 @@
       } catch (e) {
         manifest = [];
       }
-      try {
-        packs = JSON.parse(localStorage.getItem(PACKS_KEY) || "null");
-      } catch (e) {
-        packs = null;
+      // The app's module store (iOS 14 and later): files in the app's own
+      // folder instead of claude.ai's web storage.
+      const handlers = window.webkit && window.webkit.messageHandlers;
+      if (handlers && handlers.moduleStore) {
+        store = { call: (message) => handlers.moduleStore.postMessage(message) };
+        try {
+          localStorage.removeItem("__appModulePacks"); // round 7 build
+          migrate = localStorage.getItem(MIGRATED_KEY) !== "1";
+        } catch (e) {
+          migrate = true;
+        }
       }
     }
 
@@ -166,7 +175,8 @@
       fast: FAST,
       minify: FAST,
       manifest: manifest,
-      packs: packs,
+      store: store,
+      migrate: migrate,
       workerSource: FAST ? window.__appWorkerSource : undefined,
       workerCount: 2,
       runScript: (code, src) => {
@@ -231,22 +241,17 @@
       if (prune) {
         const keep = [];
         history.forEach((h) => keep.push.apply(keep, h.used));
-        LT.pruneCache(keep);
+        const cleared = LT.pruneCache(keep);
         LT.releaseUnused();
-        buildPacks();
+        if (cleared && typeof cleared.then === "function") {
+          cleared.then(() => {
+            try {
+              localStorage.setItem(MIGRATED_KEY, "1");
+            } catch (e) {}
+          }).catch(() => {});
+        }
       }
     } catch (e) {}
-  };
-  // The next launch reads the modules this one ran first as a few packs.
-  const buildPacks = () => {
-    if (typeof LT.buildPacks !== "function") return;
-    let current = null;
-    try {
-      current = JSON.parse(localStorage.getItem(PACKS_KEY) || "null");
-    } catch (e) {}
-    LT.buildPacks(current).then((index) => {
-      if (index) localStorage.setItem(PACKS_KEY, JSON.stringify(index));
-    }).catch(() => {});
   };
   setTimeout(() => saveUsage(true), 45000);
   document.addEventListener("visibilitychange", () => {

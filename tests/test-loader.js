@@ -38,13 +38,38 @@ function makeCaches() {
     opened,
     api: {
       open: async (name) => open(name),
+      has: async (name) => stores.has(name),
       keys: async () => Array.from(stores.keys()),
       delete: async (name) => stores.delete(name),
     },
   };
 }
 
-function run({ fast, caches, manifest, packs, workers = true, workerBreaks = false }) {
+// --- The app's module store (the moduleStore handler in ViewController.m) ----
+function makeStore(fails) {
+  const files = new Map();
+  const calls = [];
+  const dirs = new Set();
+  return {
+    files, calls, dirs,
+    call: (m) => new Promise((resolve, reject) => setImmediate(() => {
+      calls.push(m.op);
+      dirs.add(m.dir);
+      if (fails) return reject(new Error("refused"));
+      if (m.op === "get") return resolve(m.keys.map((k) => (files.has(k) ? files.get(k) : null)));
+      if (m.op === "put") { files.set(m.key, m.code); return resolve(true); }
+      if (m.op === "prune") {
+        const keep = new Set(m.keep);
+        let removed = 0;
+        for (const k of Array.from(files.keys())) if (!keep.has(k)) { files.delete(k); removed++; }
+        return resolve({ removed, files: files.size, bytes: 0 });
+      }
+      reject(new Error("unknown operation"));
+    })),
+  };
+}
+
+function run({ fast, caches, manifest, store, migrate, workers = true, workerBreaks = false }) {
   const order = [];
   const fetched = [];
   const blobs = new Map();
@@ -75,7 +100,7 @@ function run({ fast, caches, manifest, packs, workers = true, workerBreaks = fal
   if (workers) Object.assign(page, { Worker: FakeWorker, Blob: FakeBlob, URL: URLx });
   const LT = page.LegacyTranspiler;
   LT.init({
-    BASE_URL: BASE, fast, minify: fast, manifest: manifest || [], packs,
+    BASE_URL: BASE, fast, minify: fast, manifest: manifest || [], store, migrate,
     workerSource: transpilerSrc + "\n;\n" + workerGlue, workerCount: 2,
     target: { platform: "iOS", version: "16.3" },
     runScript: (code) => vm.runInContext(code, ctx),
@@ -121,48 +146,67 @@ function run({ fast, caches, manifest, packs, workers = true, workerBreaks = fal
   const mods = second.LT.stats().modules;
   assert.ok(mods.every((m) => m.codeAt >= 0 && m.ranAt >= m.codeAt && m.doneAt >= m.codeAt), "timings recorded");
 
-  // Packs: built from what the second launch ran, in the order it ran.
-  const PACKS = "transpiled-fast-v0.1.24-1-packs";
-  const index = await second.LT.buildPacks(null);
-  assert.ok(index && index.id, "packs built");
-  assert.strictEqual([].concat(...index.lists).map((u) => u.split("/").pop()).join(","), "index.js,a.js,c.js,b.js,d.js", "packed in start order");
-  assert.strictEqual(caches.stores.get(PACKS).size, 1, "one pack");
-  assert.strictEqual(await second.LT.buildPacks(index), null, "packs up to date: no rebuild");
+  // The app's module store. First launch with it: modules move over from the
+  // web cache, nothing is downloaded.
+  const store = makeStore();
+  const moved = await run({ fast: true, caches, manifest, store, migrate: true });
+  assert.deepStrictEqual(moved.order, EXPECT, "fast order, moving to the store");
+  const s4 = moved.LT.stats().stats;
+  assert.strictEqual(s4.store, "app");
+  assert.strictEqual(s4.migrated, 5, "moved: " + s4.migrated);
+  assert.deepStrictEqual(moved.fetched, []);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(store.files.size, 5, "store filled");
+  assert.strictEqual(store.files.get(BASE + "/a.js"), fastStore.get(BASE + "/a.js"), "same code");
+  // Housekeeping with the store: unused files and every web cache go.
+  const webBefore = new Map(fastStore);
+  await moved.LT.pruneCache(manifest.filter((u) => !u.endsWith("d.js")));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!Array.from(caches.stores.keys()).some((n) => n.startsWith("transpiled")), "web caches deleted");
+  assert.ok(!store.files.has(BASE + "/d.js") && store.files.has(BASE + "/c.js"), "unused file pruned");
+  store.files.set(BASE + "/d.js", webBefore.get(BASE + "/d.js"));
 
-  // Third launch: everything from the pack, the module cache is never opened.
+  // Next launch: one batch read from the store, the web cache is not touched.
   caches.opened.length = 0;
-  const third = await run({ fast: true, caches, manifest, packs: index });
-  assert.deepStrictEqual(third.order, EXPECT, "fast order from packs");
-  const s4 = third.LT.stats().stats;
-  assert.strictEqual(s4.packHits, 5, "modules from packs: " + s4.packHits);
-  assert.strictEqual(s4.packsRead, 1);
-  assert.strictEqual(s4.packError, "");
-  assert.deepStrictEqual(third.fetched, []);
-  assert.ok(!caches.opened.includes("transpiled-fast-v0.1.24-1"), "module cache not opened: " + caches.opened);
+  store.calls.length = 0;
+  const fromStore = await run({ fast: true, caches, manifest, store, migrate: false });
+  assert.deepStrictEqual(fromStore.order, EXPECT, "fast order from the store");
+  const s5 = fromStore.LT.stats().stats;
+  assert.strictEqual(s5.batchHits, 5, "from batches: " + s5.batchHits);
+  assert.strictEqual(s5.batchesRead, 1);
+  assert.strictEqual(s5.storeError, "");
+  assert.deepStrictEqual(fromStore.fetched, []);
+  assert.deepStrictEqual(caches.opened, [], "web cache untouched");
+  assert.deepStrictEqual(store.calls, ["get"], "one request to the app: " + store.calls);
 
-  // A damaged pack: modules come from the module cache instead, same order.
-  const packStore = caches.stores.get(PACKS);
-  const packUrl = Array.from(packStore.keys())[0];
-  const goodPack = packStore.get(packUrl);
-  packStore.set(packUrl, goodPack.slice(0, goodPack.length - 10));
-  const damaged = await run({ fast: true, caches, manifest, packs: index });
-  assert.deepStrictEqual(damaged.order, EXPECT, "fast order, damaged pack");
-  const s5 = damaged.LT.stats().stats;
-  assert.strictEqual(s5.packHits, 0);
-  assert.strictEqual(s5.hits, 5);
-  assert.ok(/damaged/.test(s5.packError), s5.packError);
-  // ...and the next build replaces it.
-  const rebuilt = await damaged.LT.buildPacks(index);
-  assert.ok(rebuilt && rebuilt.id !== index.id, "damaged packs rebuilt");
-  assert.strictEqual(packStore.size, 1, "old pack removed");
-  assert.notStrictEqual(Array.from(packStore.keys())[0], packUrl);
+  // Empty store, nothing to move: transpiled in workers and saved in the store.
+  const fresh = makeStore();
+  const cold = await run({ fast: true, caches: makeCaches(), store: fresh, migrate: false });
+  assert.deepStrictEqual(cold.order, EXPECT, "fast order, empty store");
+  assert.strictEqual(cold.LT.stats().stats.workerJobs, 5);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(fresh.files.size, 5, "saved to the store");
+
+  // A store that fails: the page still loads.
+  const broken = makeStore(true);
+  const failing = await run({ fast: true, caches: makeCaches(), manifest, store: broken, migrate: false });
+  assert.deepStrictEqual(failing.order, EXPECT, "fast order, failing store");
+  assert.ok(/refused/.test(failing.LT.stats().stats.storeError));
+  // Larger launches are read 40 modules per request.
+  const many = await run({ fast: true, caches: makeCaches(), manifest: manifest.concat(Array.from({ length: 80 }, (_, i) => BASE + "/x" + i + ".js")), store: makeStore() });
+  assert.strictEqual(many.LT.stats().stats.batches, 3, "batches of 40");
+
+  // Without the store: housekeeping on the web cache as before.
+  const second2 = await run({ fast: true, caches, manifest });
+  assert.deepStrictEqual(second2.order, EXPECT);
 
   // Housekeeping: old caches go, entries outside the keep list go.
-  second.LT.pruneCache(manifest.filter((u) => !u.endsWith("d.js")));
+  caches.stores.set("transpiled-v0.1.24", new Map([["old", "x"]]));
+  second2.LT.pruneCache(manifest.filter((u) => !u.endsWith("d.js")));
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(!caches.stores.has("transpiled-v0.1.24"), "old cache removed");
-  assert.ok(caches.stores.has(PACKS), "pack cache kept");
-  assert.ok(!fastStore.has(BASE + "/d.js") && fastStore.has(BASE + "/c.js"), "unused entry pruned");
+  const fastStore2 = caches.stores.get("transpiled-fast-v0.1.24-1");
+  assert.ok(!fastStore2.has(BASE + "/d.js") && fastStore2.has(BASE + "/c.js"), "unused entry pruned");
 
   // No workers available: transpiled on the page instead, same order.
   const noWorkers = await run({ fast: true, caches: makeCaches(), workerBreaks: true });

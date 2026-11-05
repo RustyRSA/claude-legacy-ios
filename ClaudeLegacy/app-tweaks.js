@@ -934,14 +934,15 @@
         ", cache saves failed " + s.putFailures + (s.putError ? " (" + s.putError + ")" : "") +
         ", old entries removed " + s.pruned + ", old caches removed " + s.cachesRemoved
     ];
-    if (s.packs !== undefined) {
+    if (s.store) {
       var first = mods[0];
-      out.push("  packs: " + s.packsRead + " of " + s.packs + " read in " + Math.round(s.packMs) + " ms (first ready " +
-        seconds(s.firstPackAt) + "), " + s.packHits + " modules from packs, cache opened in " + Math.round(s.cacheOpenMs) +
-        " ms (packs " + Math.round(s.packCacheOpenMs) + " ms), entry code ready " +
-        (first && first.codeAt ? seconds(first.codeAt) : "not seen") +
-        (s.packsBuilt ? ", rebuilt " + s.packsBuilt + " packs in " + Math.round(s.packBuildMs) + " ms" : "") +
-        (s.packError ? " (" + s.packError + ")" : ""));
+      out.push("  storage: " + (s.store === "app" ? "app files" : "web cache") + ", entry code ready " +
+        (first && first.codeAt ? seconds(first.codeAt) : "not seen") + ", batches " + s.batchesRead + " of " + s.batches +
+        " read in " + Math.round(s.batchMs) + " ms (first ready " + seconds(s.firstBatchAt) + "), " + s.batchHits +
+        " modules from batches, " + s.migrated + " moved from the web cache" +
+        (s.cacheOpenMs ? " (opened in " + Math.round(s.cacheOpenMs) + " ms)" : "") +
+        (s.storeFiles ? ", " + s.storeFiles + " files " + (s.storeBytes / 1048576).toFixed(1) + " MB" : "") +
+        (s.storeError ? " (" + s.storeError + ")" : ""));
     }
     var slow = mods.filter(function (m) { return m.ranAt && m.codeAt; })
       .sort(function (a, b) { return (b.ranAt - b.codeAt) - (a.ranAt - a.codeAt); }).slice(0, 5)

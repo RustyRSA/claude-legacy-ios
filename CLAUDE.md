@@ -60,12 +60,15 @@ Modules run in one of two ways (`patch.js`):
   after 45 s, caches/entries not used by the last 3 launches
   (`__appModuleHistory`) are deleted. Execution order is unchanged.
 - `LegacyTranspiler.stats()` feeds the launch section of the debug log.
-- Packs (round 7): modules run in the first 20 s are also stored, in start order,
-  as ~2 MB packs in cache `transpiled-fast-v0.1.24-1-packs` (index in
-  `localStorage.__appModulePacks`), rebuilt at 45 s when a module run in the first
-  10 s is missing. Boot reads the packs; the module cache is opened only for the
-  rest. All cache reads go through a queue (6 at a time): waited-for reads, then
-  packs, then head starts.
+- App module store (round 7, iOS 14+): fast mode keeps transpiled modules as
+  files in the app's Caches folder (`Library/Caches/transpiled-modules/<cache name>/<sha256 of address>.js`),
+  not in claude.ai's CacheStorage. Page side asks the `moduleStore` reply handler
+  (`ModuleStore` in `ViewController.m`: get / put / prune, top frame of claude.ai only).
+  Boot reads the last launch's manifest 40 modules per request; all reads go through
+  a queue (6 at a time): waited-for reads, then launch batches, then head starts.
+  First launch moves modules over from the old web cache; housekeeping at 45 s then
+  deletes every `transpiled*` web cache (`localStorage.__appStoreMigrated`).
+  Without the handler (iOS 13) the web cache is used as before.
 
 ## Files
 
@@ -126,16 +129,19 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | `9c99976` | 04 | Voice mode works: https→wss WebSocket conversion (Safari 16 throws on https: socket URLs), PCM recording patch |
 | `7e8e00c` | 05 | Full-bleed icon (no white flash), launch colours, smoother edge colours, steady composer (overscroll), tap tweaks |
 | `332633c` | 06 | Fast loading, launch timeline, sign-in protection, crash reload, bridge security, page size, tap fix |
-| (next) | 07 | Launch: module packs + prioritised cache reads (see Loader) |
+| `312d524` | 07a | Packs in CacheStorage (failed: quota full) |
+| (next) | 07 | Launch: app module store outside claude.ai's storage, batched reads (see Loader) |
 
 ### Round 07 (5 Nov 2026)
-- Launch log 1 (31 Oct, round 06): 705 modules all from cache, none transpiled,
-  yet first module at 5.0 s, last 9.6 s, cache reads summing to 80 s. Cause taken
-  to be ~700 separate CacheStorage reads queued at once (iOS cost per read).
-- Fix: packs + read queue (Loader). Debug log adds a `packs:` line (packs read,
-  first ready, modules from packs, cache open times, entry code ready, rebuilds).
-- First launch after installing builds the packs at 45 s; the gain shows from the
-  second launch.
+- Log 1 (31 Oct, round 06): 705 modules all from cache, first module 5.0 s, last 9.6 s.
+- 07a (packs in CacheStorage), log 2: storage quota full — 172 cache saves failed,
+  pack build QuotaExceededError, claude.ai's own IndexedDB read rejected; opening the
+  cache took 5.5 s and the entry module was ready right after (5.7 s). claude.ai had
+  updated (243 modules transpiled). So the web cache itself was the bottleneck.
+- Fix: app module store (Loader). Debug log `storage:` line: app files / web cache,
+  entry code ready, batches, modules moved, store size, errors.
+- First launch after installing moves modules over and frees the web storage at 45 s;
+  the gain shows from the second launch.
 
 ### Round 06 (30 Oct 2026)
 - Fast loading (loader above) with in-page nonce execution; Advanced menu toggle.
@@ -258,7 +264,8 @@ analytics of its own (claude.ai itself runs Datadog RUM).
 
 | Item | Status |
 |---|---|
-| Launch ~10 s (log 1, round 06) | 07 packs. Next: check the `packs:` line after the second launch; then main-thread stalls (1.05 s @4.9 s) and the 14 API calls at launch |
+| Launch ~10 s (log 1, round 06) | 07 app module store. Next: check the `storage:` line after the second launch; then main-thread stalls and the 14 API calls at launch |
+| claude.ai storage full (log 2) | 07 moves transpiled code out and deletes the web caches; check claude.ai's IndexedDB warning is gone |
 | Send button / mic / chats appear late | Same as above (they appear when React hydrates); native chat list would bypass it |
 | Sidebar taps sometimes do nothing | 06 tap fix + "taps without a click" counter. Confirm with the log; if misses remain, look at the logged targets |
 | Chat switch ~2 s | 06 logs address/data/settled times; decide between API and rendering |

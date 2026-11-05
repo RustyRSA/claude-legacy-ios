@@ -14,7 +14,5 @@ done
 for t in test-dom.js test-tweaks2.js test-patch.js; do
   node "$t" "$REPO" "$TESTS" 2>/dev/null | tail -n 1
 done
-if command -v python3 >/dev/null 2>&1; then
-  echo "Bracket balance (Objective-C):"
-  python3 balance.py "$REPO"/ClaudeLegacy/*.m
-fi
+echo "Bracket balance (Objective-C):"
+node balance.js "$REPO"/ClaudeLegacy/*.m
