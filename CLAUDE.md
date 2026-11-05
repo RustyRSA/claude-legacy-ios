@@ -134,6 +134,23 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | `312d524` | 07a | Packs in CacheStorage (failed: quota full) |
 | (next) | 07 | Launch: app module store outside claude.ai's storage, batched reads (see Loader) |
 
+### Round 12 (5 Nov 2026) — native controls, stage 1
+- Goal (Logan): look and feel of the iPhone app (references: `C:Claudeclaudeioslegacyeference`,
+  App Store + Mobbin screenshots). Use Apple's own iOS 16 controls (UIKit, SF Symbols, New York
+  serif), no liquid-glass imitation; no assets taken from the official app.
+- `NativeChrome` (ViewController.m, iOS 15+): round menu button (top left), ghost incognito
+  button on new chat or new-chat + "..." pill in a chat (top right), message box card at the
+  bottom (text, +, model pill with effort in grey, mic, one action button: voice / send
+  (orange) / stop). Follows the keyboard (keyboardLayoutGuide). Touches elsewhere go through.
+- Page side (app-tweaks.js "Native controls"): finds claude.ai's header and message box by
+  aria-labels, makes them invisible (opacity 0, no touches) but keeps them in place, reports
+  state to the `chrome` handler; `window.__appChrome.run(action)` presses claude.ai's buttons
+  (its menus open where the native buttons are); send = focus claude.ai's box with
+  inputmode none, select all, execCommand insertText, press Send. Anything missing ->
+  nothing hidden, native hidden, reason in the debug log (`native controls:` line).
+- Advanced menu: "Native controls" switch (setting `NativeControls`, default on).
+- Not yet native: the + / model / chat menus (claude.ai's web menus open), sidebar, messages.
+
 ### Round 11 (5 Nov 2026) — launch freezes
 - Log 10: main thread blocked 1.2 s at 0.0 s, 0.6 s at 1.5 s, 0.9 s at 3.4 s.
 - Workers start at the first module that needs transpiling (none on most launches)

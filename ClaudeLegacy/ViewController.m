@@ -53,6 +53,7 @@ static const NSTimeInterval kLoadingTimeout = 60.0;
 /// on; page size defaults to 110 %.
 static NSString *const kFastLoadKey = @"FastLoading";
 static NSString *const kTapFixKey = @"TapFix";
+static NSString *const kNativeChromeKey = @"NativeControls";
 static NSString *const kPageScaleKey = @"PageScale";
 
 /// Events worth keeping across reloads and launches (sign-outs, the page process
@@ -282,6 +283,397 @@ API_AVAILABLE(ios(14.0))
 
 @end
 
+#pragma mark - Native controls
+
+/// A colour for light and for dark appearance, given as 0xRRGGBB.
+static UIColor *ThemedColor(UInt32 light, UInt32 dark) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        UInt32 value = traits.userInterfaceStyle == UIUserInterfaceStyleDark ? dark : light;
+        return [UIColor colorWithRed:((value >> 16) & 0xFF) / 255.0
+                               green:((value >> 8) & 0xFF) / 255.0
+                                blue:(value & 0xFF) / 255.0
+                               alpha:1.0];
+    }];
+}
+
+/// The incognito ghost: the iPhone app's icon, which SF Symbols on iOS 16 lacks.
+static UIImage *GhostImage(void) {
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(22, 22)];
+    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        UIBezierPath *body = [UIBezierPath bezierPath];
+        [body moveToPoint:CGPointMake(3, 20)];
+        [body addLineToPoint:CGPointMake(3, 10)];
+        [body addArcWithCenter:CGPointMake(11, 10) radius:8 startAngle:M_PI endAngle:0 clockwise:YES];
+        [body addLineToPoint:CGPointMake(19, 20)];
+        CGFloat xs[] = {16.33, 13.67, 11.0, 8.33, 5.67, 3.0};
+        for (int i = 0; i < 6; i++) {
+            [body addLineToPoint:CGPointMake(xs[i], i % 2 == 0 ? 17.5 : 20)];
+        }
+        [body closePath];
+        body.lineWidth = 1.7;
+        body.lineJoinStyle = kCGLineJoinRound;
+        [UIColor.blackColor setStroke];
+        [body stroke];
+        [UIColor.blackColor setFill];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(6.8, 9.3, 2.4, 2.4)] fill];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(12.8, 9.3, 2.4, 2.4)] fill];
+    }];
+    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+static UIImage *SymbolImage(NSString *name, CGFloat pointSize) {
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:pointSize
+                                                                                         weight:UIImageSymbolWeightRegular];
+    return [UIImage systemImageNamed:name withConfiguration:config];
+}
+
+/// The iPhone app's controls, drawn natively over the page: a round menu button
+/// at the top left, the incognito button (new chat) or a new-chat and "..." pill
+/// (in a chat) at the top right, and the message box card at the bottom. Each
+/// button asks the page to press claude.ai's own control (onAction); the page
+/// reports which controls it found and claude.ai's state (applyState:). Touches
+/// outside the controls go through to the page.
+API_AVAILABLE(ios(15.0))
+@interface NativeChrome : UIView <UITextViewDelegate>
+@property (nonatomic, copy) void (^onAction)(NSString *name, NSString *argument);
+- (void)applyState:(NSDictionary *)state;
+/// After a send: clears the box when it worked and gives the keyboard back.
+- (void)finishSend:(BOOL)sent;
+@end
+
+@implementation NativeChrome {
+    UIButton *_menuButton;
+    UIButton *_incognitoButton;
+    UIView *_pill;
+    UIButton *_newChatButton;
+    UIButton *_moreButton;
+    UIView *_card;
+    UITextView *_textView;
+    UILabel *_placeholder;
+    NSLayoutConstraint *_textHeight;
+    UIButton *_plusButton;
+    UIButton *_modelButton;
+    UIButton *_micButton;
+    UIButton *_actionButton;
+    NSString *_actionName;
+    BOOL _shown;
+    BOOL _streaming;
+    BOOL _voice;
+    BOOL _refocusAfterSend;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.hidden = YES;
+        self.alpha = 0;
+        [self buildControls];
+    }
+    return self;
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return hit == self ? nil : hit;
+}
+
++ (UIColor *)floatingColor { return ThemedColor(0xFFFFFF, 0x30302E); }
++ (UIColor *)chipColor { return ThemedColor(0xF0EEE6, 0x3D3D3A); }
+
+- (void)addShadowTo:(UIView *)view {
+    view.layer.shadowColor = UIColor.blackColor.CGColor;
+    view.layer.shadowOpacity = 0.08;
+    view.layer.shadowRadius = 10;
+    view.layer.shadowOffset = CGSizeMake(0, 2);
+}
+
+- (UIButton *)circleButton:(UIImage *)image
+                  diameter:(CGFloat)diameter
+                background:(UIColor *)background
+                    action:(SEL)action
+                     label:(NSString *)label
+{
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    [button setImage:image forState:UIControlStateNormal];
+    button.tintColor = UIColor.labelColor;
+    button.backgroundColor = background;
+    button.layer.cornerRadius = diameter / 2;
+    button.accessibilityLabel = label;
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [NSLayoutConstraint activateConstraints:@[
+        [button.widthAnchor constraintEqualToConstant:diameter],
+        [button.heightAnchor constraintEqualToConstant:diameter],
+    ]];
+    return button;
+}
+
+- (void)buildControls {
+    UIColor *floating = [NativeChrome floatingColor];
+    UIColor *chip = [NativeChrome chipColor];
+    UILayoutGuide *safe = self.safeAreaLayoutGuide;
+
+    _menuButton = [self circleButton:SymbolImage(@"line.3.horizontal", 18) diameter:48 background:floating
+                              action:@selector(menuTapped) label:@"Chats"];
+    [self addShadowTo:_menuButton];
+    _incognitoButton = [self circleButton:GhostImage() diameter:48 background:floating
+                                   action:@selector(incognitoTapped) label:@"Incognito chat"];
+    [self addShadowTo:_incognitoButton];
+
+    _pill = [[UIView alloc] init];
+    _pill.translatesAutoresizingMaskIntoConstraints = NO;
+    _pill.backgroundColor = floating;
+    _pill.layer.cornerRadius = 24;
+    [self addShadowTo:_pill];
+    _newChatButton = [self circleButton:SymbolImage(@"plus.bubble.fill", 20) diameter:44 background:UIColor.clearColor
+                                 action:@selector(newChatTapped) label:@"New chat"];
+    _moreButton = [self circleButton:SymbolImage(@"ellipsis", 17) diameter:44 background:UIColor.clearColor
+                              action:@selector(moreTapped) label:@"Chat options"];
+    [_pill addSubview:_newChatButton];
+    [_pill addSubview:_moreButton];
+
+    for (UIView *view in @[_menuButton, _incognitoButton, _pill]) {
+        [self addSubview:view];
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        [_menuButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:16],
+        [_menuButton.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
+        [_incognitoButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
+        [_incognitoButton.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
+        [_pill.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
+        [_pill.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
+        [_pill.heightAnchor constraintEqualToConstant:48],
+        [_newChatButton.leadingAnchor constraintEqualToAnchor:_pill.leadingAnchor constant:6],
+        [_newChatButton.centerYAnchor constraintEqualToAnchor:_pill.centerYAnchor],
+        [_moreButton.leadingAnchor constraintEqualToAnchor:_newChatButton.trailingAnchor constant:2],
+        [_moreButton.trailingAnchor constraintEqualToAnchor:_pill.trailingAnchor constant:-6],
+        [_moreButton.centerYAnchor constraintEqualToAnchor:_pill.centerYAnchor],
+    ]];
+
+    // The message box card.
+    _card = [[UIView alloc] init];
+    _card.translatesAutoresizingMaskIntoConstraints = NO;
+    _card.backgroundColor = floating;
+    _card.layer.cornerRadius = 26;
+    [self addShadowTo:_card];
+    [self addSubview:_card];
+
+    _textView = [[UITextView alloc] init];
+    _textView.translatesAutoresizingMaskIntoConstraints = NO;
+    _textView.font = [UIFont systemFontOfSize:17];
+    _textView.textColor = UIColor.labelColor;
+    _textView.backgroundColor = UIColor.clearColor;
+    _textView.textContainerInset = UIEdgeInsetsMake(8, 4, 8, 4);
+    _textView.scrollEnabled = NO;
+    _textView.delegate = self;
+    [_card addSubview:_textView];
+
+    _placeholder = [[UILabel alloc] init];
+    _placeholder.translatesAutoresizingMaskIntoConstraints = NO;
+    _placeholder.font = [UIFont systemFontOfSize:17];
+    _placeholder.textColor = UIColor.placeholderTextColor;
+    _placeholder.text = @"Chat with Claude";
+    _placeholder.userInteractionEnabled = NO;
+    [_card addSubview:_placeholder];
+
+    _plusButton = [self circleButton:SymbolImage(@"plus", 17) diameter:40 background:chip
+                              action:@selector(plusTapped) label:@"Add files"];
+    _micButton = [self circleButton:SymbolImage(@"mic", 17) diameter:40 background:chip
+                             action:@selector(micTapped) label:@"Dictate"];
+    _actionButton = [self circleButton:SymbolImage(@"waveform", 17) diameter:40 background:UIColor.labelColor
+                                action:@selector(actionTapped) label:@"Voice mode"];
+
+    UIButtonConfiguration *modelConfig = [UIButtonConfiguration plainButtonConfiguration];
+    modelConfig.contentInsets = NSDirectionalEdgeInsetsMake(0, 14, 0, 14);
+    UIBackgroundConfiguration *modelBackground = [UIBackgroundConfiguration clearConfiguration];
+    modelBackground.backgroundColor = chip;
+    modelConfig.background = modelBackground;
+    modelConfig.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    _modelButton = [UIButton buttonWithConfiguration:modelConfig primaryAction:nil];
+    _modelButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _modelButton.accessibilityLabel = @"Model";
+    [_modelButton addTarget:self action:@selector(modelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self setModel:@"Claude" effort:@""];
+
+    for (UIView *view in @[_plusButton, _modelButton, _micButton, _actionButton]) {
+        [_card addSubview:view];
+    }
+
+    _textHeight = [_textView.heightAnchor constraintEqualToConstant:40];
+    [NSLayoutConstraint activateConstraints:@[
+        [_card.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
+        [_card.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+        [_card.bottomAnchor constraintEqualToAnchor:self.keyboardLayoutGuide.topAnchor constant:-8],
+        [_textView.topAnchor constraintEqualToAnchor:_card.topAnchor constant:8],
+        [_textView.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:10],
+        [_textView.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-10],
+        _textHeight,
+        [_placeholder.leadingAnchor constraintEqualToAnchor:_textView.leadingAnchor constant:9],
+        [_placeholder.centerYAnchor constraintEqualToAnchor:_textView.topAnchor constant:20],
+        [_plusButton.topAnchor constraintEqualToAnchor:_textView.bottomAnchor constant:6],
+        [_plusButton.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:10],
+        [_plusButton.bottomAnchor constraintEqualToAnchor:_card.bottomAnchor constant:-10],
+        [_modelButton.leadingAnchor constraintEqualToAnchor:_plusButton.trailingAnchor constant:8],
+        [_modelButton.centerYAnchor constraintEqualToAnchor:_plusButton.centerYAnchor],
+        [_modelButton.heightAnchor constraintEqualToConstant:40],
+        [_modelButton.trailingAnchor constraintLessThanOrEqualToAnchor:_micButton.leadingAnchor constant:-8],
+        [_actionButton.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-10],
+        [_actionButton.centerYAnchor constraintEqualToAnchor:_plusButton.centerYAnchor],
+        [_micButton.trailingAnchor constraintEqualToAnchor:_actionButton.leadingAnchor constant:-8],
+        [_micButton.centerYAnchor constraintEqualToAnchor:_plusButton.centerYAnchor],
+    ]];
+    [self updateActionButton];
+}
+
+- (void)setModel:(NSString *)model effort:(NSString *)effort {
+    NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:model.length ? model : @"Model"
+        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:16], NSForegroundColorAttributeName: UIColor.labelColor}];
+    if (effort.length) {
+        [title appendAttributedString:[[NSAttributedString alloc] initWithString:[@" " stringByAppendingString:effort]
+            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:16], NSForegroundColorAttributeName: UIColor.secondaryLabelColor}]];
+    }
+    UIButtonConfiguration *config = _modelButton.configuration;
+    config.attributedTitle = title;
+    _modelButton.configuration = config;
+}
+
+- (NSString *)trimmedText {
+    return [_textView.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+}
+
+/// One button at the right of the card, as in the iPhone app: stop while Claude
+/// answers, send when there is text, voice mode otherwise.
+- (void)updateActionButton {
+    NSString *symbol;
+    UIColor *background;
+    UIColor *tint;
+    NSString *label;
+    if (_streaming) {
+        _actionName = @"stop";
+        symbol = @"stop.fill";
+        background = [NativeChrome chipColor];
+        tint = UIColor.labelColor;
+        label = @"Stop";
+    } else if ([self trimmedText].length > 0 || !_voice) {
+        _actionName = @"send";
+        symbol = @"arrow.up";
+        background = [self trimmedText].length > 0 ? ThemedColor(0xD97757, 0xD97757) : [NativeChrome chipColor];
+        tint = [self trimmedText].length > 0 ? UIColor.whiteColor : UIColor.tertiaryLabelColor;
+        label = @"Send";
+    } else {
+        _actionName = @"voice";
+        symbol = @"waveform";
+        background = UIColor.labelColor;
+        tint = UIColor.systemBackgroundColor;
+        label = @"Voice mode";
+    }
+    [_actionButton setImage:SymbolImage(symbol, 17) forState:UIControlStateNormal];
+    _actionButton.backgroundColor = background;
+    _actionButton.tintColor = tint;
+    _actionButton.accessibilityLabel = label;
+    _micButton.hidden = _streaming;
+}
+
+- (void)textViewDidChange:(UITextView *)textView {
+    _placeholder.hidden = textView.text.length > 0;
+    CGFloat width = textView.bounds.size.width > 0 ? textView.bounds.size.width : 300;
+    CGFloat needed = [textView sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)].height;
+    _textHeight.constant = MIN(MAX(needed, 40), 140);
+    textView.scrollEnabled = needed > 140;
+    [self updateActionButton];
+}
+
+- (void)applyState:(NSDictionary *)state {
+    BOOL ready = [state[@"ready"] boolValue];
+    BOOL sidebarOpen = [state[@"sidebarOpen"] boolValue];
+    NSString *page = [state[@"page"] isKindOfClass:NSString.class] ? state[@"page"] : @"";
+    BOOL inChat = [page isEqualToString:@"chat"];
+    _streaming = [state[@"streaming"] boolValue];
+    _voice = [state[@"voice"] boolValue];
+
+    _incognitoButton.hidden = inChat || ![state[@"incognito"] boolValue];
+    _pill.hidden = !inChat;
+    _moreButton.enabled = [state[@"more"] boolValue];
+    _micButton.enabled = [state[@"dictate"] boolValue];
+    _placeholder.text = inChat ? @"Reply to Claude" : @"Chat with Claude";
+    NSString *model = [state[@"model"] isKindOfClass:NSString.class] ? state[@"model"] : @"";
+    NSString *effort = [state[@"effort"] isKindOfClass:NSString.class] ? state[@"effort"] : @"";
+    [self setModel:model effort:effort];
+    [self updateActionButton];
+
+    BOOL show = ready && !sidebarOpen;
+    if (show == _shown) {
+        return;
+    }
+    _shown = show;
+    if (!show && _textView.isFirstResponder) {
+        [_textView resignFirstResponder];
+    }
+    if (show) {
+        self.hidden = NO;
+    }
+    [UIView animateWithDuration:0.2 animations:^{
+        self.alpha = show ? 1 : 0;
+    } completion:^(BOOL finished) {
+        if (!self->_shown) {
+            self.hidden = YES;
+        }
+    }];
+}
+
+- (void)finishSend:(BOOL)sent {
+    if (sent) {
+        _textView.text = @"";
+        [self textViewDidChange:_textView];
+    }
+    if (_refocusAfterSend) {
+        [_textView becomeFirstResponder];
+    }
+    _refocusAfterSend = NO;
+}
+
+- (void)fire:(NSString *)name argument:(NSString *)argument {
+    if (self.onAction) {
+        self.onAction(name, argument);
+    }
+}
+
+- (void)menuTapped {
+    [_textView resignFirstResponder];
+    [self fire:@"sidebar" argument:nil];
+}
+- (void)incognitoTapped { [self fire:@"incognito" argument:nil]; }
+- (void)newChatTapped { [self fire:@"newChat" argument:nil]; }
+- (void)moreTapped {
+    [_textView resignFirstResponder];
+    [self fire:@"more" argument:nil];
+}
+- (void)plusTapped {
+    [_textView resignFirstResponder];
+    [self fire:@"plus" argument:nil];
+}
+- (void)modelTapped {
+    [_textView resignFirstResponder];
+    [self fire:@"model" argument:nil];
+}
+- (void)micTapped { [self fire:@"dictate" argument:nil]; }
+- (void)actionTapped {
+    if ([_actionName isEqualToString:@"send"]) {
+        NSString *text = [self trimmedText];
+        if (text.length == 0) {
+            return;
+        }
+        _refocusAfterSend = _textView.isFirstResponder;
+        [self fire:@"send" argument:text];
+    } else {
+        [_textView resignFirstResponder];
+        [self fire:_actionName argument:nil];
+    }
+}
+
+@end
+
 @interface ViewController () <WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate, UIGestureRecognizerDelegate, WKHTTPCookieStoreObserver>
 
 @property (nonatomic) IBOutlet WKWebView *webView;
@@ -321,6 +713,8 @@ API_AVAILABLE(ios(14.0))
 @property (nonatomic, assign) BOOL observingCookies;
 /// Pasteboard contents already offered as a sign-in link.
 @property (nonatomic, assign) NSInteger offeredPasteboardChange;
+/// The native top buttons and message box (NativeChrome, iOS 15 and later).
+@property (nonatomic, strong, nullable) UIView *nativeChrome;
 
 @end
 
@@ -415,6 +809,8 @@ API_AVAILABLE(ios(14.0))
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"loadingStatus"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"appearance"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"appEvent"];
+    [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"chrome"];
+    [self installNativeChrome];
     if (@available(iOS 14.0, *)) {
         [self.webView.configuration.userContentController addScriptMessageHandlerWithReply:[[ModuleStore alloc] init]
                                                                               contentWorld:WKContentWorld.pageWorld
@@ -500,6 +896,70 @@ API_AVAILABLE(ios(14.0))
 
     self.topFill = top;
     self.bottomFill = bottom;
+}
+
+#pragma mark - Native controls
+
+/// Adds the native top buttons and message box over the page (iOS 15 and later:
+/// they follow the keyboard with keyboardLayoutGuide). They stay hidden until the
+/// page reports that it found claude.ai's own controls and hid them.
+- (void)installNativeChrome {
+    if (@available(iOS 15.0, *)) {
+        NativeChrome *chrome = [[NativeChrome alloc] initWithFrame:CGRectZero];
+        __weak typeof(self) weakSelf = self;
+        chrome.onAction = ^(NSString *name, NSString *argument) {
+            [weakSelf runChromeAction:name argument:argument];
+        };
+        [self.view insertSubview:chrome aboveSubview:self.webView];
+        [NSLayoutConstraint activateConstraints:@[
+            [chrome.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+            [chrome.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+            [chrome.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+            [chrome.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        ]];
+        self.nativeChrome = chrome;
+    }
+}
+
+/// Asks the page to press one of claude.ai's controls (app-tweaks.js,
+/// window.__appChrome.run); "send" also types the text into claude.ai's box.
+- (void)runChromeAction:(NSString *)name argument:(NSString *)argument {
+    if (@available(iOS 15.0, *)) {
+        __weak typeof(self) weakSelf = self;
+        [self.webView callAsyncJavaScript:@"return window.__appChrome ? await window.__appChrome.run(name, arg) : 'page not ready';"
+                                arguments:@{@"name": name, @"arg": argument ?: @""}
+                                  inFrame:nil
+                           inContentWorld:WKContentWorld.pageWorld
+                        completionHandler:^(id result, NSError *error) {
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            NSString *outcome = [result isKindOfClass:NSString.class] ? result : (error.localizedDescription ?: @"no answer");
+            if (![name isEqualToString:@"send"]) {
+                return;
+            }
+            BOOL sent = [outcome isEqualToString:@"ok"];
+            [(NativeChrome *)strongSelf.nativeChrome finishSend:sent];
+            if (!sent) {
+                [strongSelf logEvent:[@"native send failed: " stringByAppendingString:outcome]];
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Message not sent"
+                                                                               message:[NSString stringWithFormat:@"%@. Your text is still in the box. If this keeps happening, turn off Native controls in Advanced.", outcome]
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [[strongSelf topPresenter] presentViewController:alert animated:YES completion:nil];
+            }
+        }];
+    }
+}
+
+- (void)handleChromeState:(id)body {
+    if (![body isKindOfClass:NSDictionary.class]) {
+        return;
+    }
+    if (@available(iOS 15.0, *)) {
+        [(NativeChrome *)self.nativeChrome applyState:body];
+    }
 }
 
 - (void)startLoading {
@@ -591,6 +1051,7 @@ API_AVAILABLE(ios(14.0))
         @"fastLoad": @(SettingBool(kFastLoadKey, YES)),
         @"tapFix": @(SettingBool(kTapFixKey, YES)),
         @"pageScale": @(PageScaleSetting()),
+        @"nativeChrome": @(self.nativeChrome != nil && SettingBool(kNativeChromeKey, YES)),
     };
     NSData *json = [NSJSONSerialization dataWithJSONObject:settings options:0 error:nil];
     if (json == nil) {
@@ -829,6 +1290,19 @@ API_AVAILABLE(ios(14.0))
     __weak typeof(self) weakSelf = self;
     BOOL fast = SettingBool(kFastLoadKey, YES);
     BOOL tapFix = SettingBool(kTapFixKey, YES);
+    BOOL nativeControls = SettingBool(kNativeChromeKey, YES);
+    if (self.nativeChrome != nil) {
+        [sheet addAction:[UIAlertAction actionWithTitle:nativeControls ? @"Native controls: on (turn off)" : @"Native controls: off (turn on)"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            [NSUserDefaults.standardUserDefaults setBool:!nativeControls forKey:kNativeChromeKey];
+            [weakSelf logEvent:[NSString stringWithFormat:@"native controls turned %@", nativeControls ? @"off" : @"on"]];
+            if (@available(iOS 15.0, *)) {
+                [(NativeChrome *)weakSelf.nativeChrome applyState:@{@"ready": @NO}];
+            }
+            [weakSelf applySettingAndReload];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:fast ? @"Fast loading: on (turn off)" : @"Fast loading: off (turn on)"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
@@ -1917,6 +2391,11 @@ API_AVAILABLE(ios(14.0))
 
     if ([message.name isEqualToString:@"loadingStatus"]) {
         [self handleLoadingStatus:message.body];
+        return;
+    }
+
+    if ([message.name isEqualToString:@"chrome"]) {
+        [self handleChromeState:message.body];
         return;
     }
 

@@ -11,7 +11,7 @@ TESTS="$PWD"
 for t in test-voice-patches.js test-loader.js; do
   node "$t" "$REPO" | tail -n 1
 done
-for t in test-dom.js test-tweaks2.js test-patch.js; do
+for t in test-dom.js test-tweaks2.js test-patch.js test-chrome.js; do
   node "$t" "$REPO" "$TESTS" 2>/dev/null | tail -n 1
 done
 echo "Bracket balance (Objective-C):"

@@ -151,7 +151,7 @@
       "settings: page size " + Math.round(PAGE_SCALE * 100) + "%, tap fix " + (TAP_FIX ? "on" : "off") +
         ", loading " + (window.__appLoader ? window.__appLoader.mode +
           (window.__appLoader.mode === "fast" ? (window.__appLoader.inPage() ? " (in page)" : " (through the app)") : "") : "?")
-    ].concat(launchSummary(), chatSummary(), tapSummary(), responsivenessSummary(), screenInventory(), ["----"]);
+    ].concat(chromeSummary(), launchSummary(), chatSummary(), tapSummary(), responsivenessSummary(), screenInventory(), ["----"]);
     return header.concat(lines).join("\n");
   };
 
@@ -1148,8 +1148,233 @@
   // ---------------------------------------------------------------------------
   // Start-up
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Native controls (round 12)
+  // ---------------------------------------------------------------------------
+  // The app draws its own top buttons and message box like the iPhone app's
+  // (ViewController.m, NativeChrome). claude.ai's header and message box are made
+  // invisible but stay in place: the app presses their buttons and puts text into
+  // claude.ai's box, so claude.ai still does the work, and its menus open where the
+  // app's buttons are. Controls are found by their labels; when one is missing,
+  // nothing is hidden (ready: false) and the app shows claude.ai's own controls.
+  var NATIVE_CHROME = settings.nativeChrome === true;
+  var chromeState = { ready: false, why: "not started" };
+  var chromeSent = "";
+  var EDITOR = '[contenteditable="true"][aria-label="Write your prompt to Claude"]';
+  var EFFORTS = /^(Low|Medium|High|Extra|Max)$/;
+
+  function find(selector, root) {
+    try {
+      return (root || document).querySelector(selector);
+    } catch (e) {
+      return null;
+    }
+  }
+  // The outermost ancestor that is still the same control (no taller than
+  // maxHeight), so its card or bar is hidden too, not only what is inside.
+  function wholeControl(el, maxHeight) {
+    var best = el;
+    var parent = el && el.parentElement;
+    while (parent && parent !== document.body && parent !== document.documentElement) {
+      var box = parent.getBoundingClientRect();
+      if (box.height > maxHeight || box.height === 0) break;
+      best = parent;
+      parent = parent.parentElement;
+    }
+    return best;
+  }
+  function chromeControls() {
+    var c = {};
+    c.editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]');
+    c.send = find('button[aria-label="Send message"]');
+    c.sidebarButton = find('button[aria-label="Show sidebar"]');
+    if (c.editor && c.send) {
+      var box = c.editor;
+      while (box && !box.contains(c.send)) box = box.parentElement;
+      if (box && box !== document.body) {
+        c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
+      }
+    }
+    if (c.sidebarButton) {
+      var top = c.sidebarButton.getBoundingClientRect().top;
+      if (top < 80) c.header = wholeControl(c.sidebarButton, 80);
+    }
+    return c;
+  }
+  // The sidebar counts as open when its "Artifacts" link is what a tap there would hit.
+  function sidebarOpen() {
+    var link = find('a[href="/artifacts"]');
+    if (!link) return false;
+    var box = link.getBoundingClientRect();
+    if (box.width === 0 || box.right <= 0 || box.left >= window.innerWidth) return false;
+    var hit = document.elementFromPoint(box.left + Math.min(20, box.width / 2), box.top + box.height / 2);
+    return !!hit && (hit === link || link.contains(hit));
+  }
+  function stopButton(root) {
+    var buttons = root ? root.querySelectorAll("button[aria-label]") : [];
+    for (var i = 0; i < buttons.length; i++) {
+      if (/^stop/i.test(buttons[i].getAttribute("aria-label"))) return buttons[i];
+    }
+    return null;
+  }
+  function pageKind() {
+    var path = location.pathname;
+    if (path === "/" || path === "/new") return "new";
+    return /^\/chat\//.test(path) ? "chat" : "other";
+  }
+
+  var hiddenNow = [];
+  function setHidden(list) {
+    hiddenNow.forEach(function (el) {
+      if (list.indexOf(el) === -1) el.removeAttribute("data-app-hidden");
+    });
+    list.forEach(function (el) { el.setAttribute("data-app-hidden", ""); });
+    hiddenNow = list;
+    document.documentElement.classList.toggle("app-native-chrome", list.length > 0);
+  }
+
+  function updateChrome() {
+    var c = chromeControls();
+    var kind = pageKind();
+    var missing = [];
+    if (!c.editor) missing.push("message box");
+    if (!c.send) missing.push("send button");
+    if (!c.composer) missing.push("message box card");
+    if (!c.header) missing.push("header");
+    var ready = kind !== "other" && missing.length === 0;
+    setHidden(ready ? [c.header, c.composer] : []);
+    var model = find('button[aria-label^="Model:"]');
+    var modelName = model ? model.getAttribute("aria-label").replace(/^Model:\s*/, "") : "";
+    var words = modelName.split(" ");
+    var effort = words.length > 1 && EFFORTS.test(words[words.length - 1]) ? words.pop() : "";
+    chromeState = {
+      ready: ready,
+      why: kind === "other" ? "page " + location.pathname.split("/")[1] : missing.length ? "missing " + missing.join(", ") : "",
+      page: kind,
+      sidebarOpen: ready && sidebarOpen(),
+      streaming: !!(c.composer && stopButton(c.composer)),
+      model: words.join(" "),
+      effort: effort,
+      voice: !!find('button[aria-label="Use voice mode"]'),
+      dictate: !!find('button[aria-label="Dictate"]'),
+      incognito: !!find('button[aria-label="Use incognito"]'),
+      more: !!(c.header && find('button[aria-label^="More options"]', c.header))
+    };
+    var key = JSON.stringify(chromeState);
+    if (key === chromeSent) return;
+    chromeSent = key;
+    try {
+      window.webkit.messageHandlers.chrome.postMessage(chromeState);
+    } catch (e) {}
+  }
+
+  function press(el, label) {
+    if (!el) return "missing " + label;
+    el.click();
+    return "ok";
+  }
+  // Puts the text into claude.ai's message box and presses its send button. The
+  // box is focused with inputmode "none" so the page's own keyboard stays away.
+  function sendText(text) {
+    var c = chromeControls();
+    if (!c.editor || !c.send) return Promise.resolve("message box not found");
+    if (!text.replace(/\s/g, "")) return Promise.resolve("nothing to send");
+    var editor = c.editor;
+    var mode = editor.getAttribute("inputmode");
+    editor.setAttribute("inputmode", "none");
+    try {
+      editor.focus();
+      var range = document.createRange();
+      range.selectNodeContents(editor);
+      var selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand("insertText", false, text);
+    } catch (e) {
+      return Promise.resolve("typing failed: " + describe(e));
+    }
+    return new Promise(function (resolve) {
+      var tries = 0;
+      var finish = function (result) {
+        try { editor.blur(); } catch (e) {}
+        if (mode === null) editor.removeAttribute("inputmode");
+        else editor.setAttribute("inputmode", mode);
+        record("chrome", "send: " + result);
+        resolve(result);
+      };
+      var attempt = function () {
+        var send = find('button[aria-label="Send message"]');
+        if (send && !send.disabled) {
+          send.click();
+          finish("ok");
+        } else if (++tries > 40) {
+          finish("send button stayed disabled");
+        } else {
+          nativeSetTimeout(attempt, 50);
+        }
+      };
+      attempt();
+    });
+  }
+
+  window.__appChrome = {
+    run: function (name, arg) {
+      var c = chromeControls();
+      var result;
+      switch (name) {
+        case "sidebar": result = press(c.sidebarButton, "sidebar button"); break;
+        case "incognito": result = press(find('button[aria-label="Use incognito"]'), "incognito button"); break;
+        case "newChat":
+          var link = find('a[href="/new"]');
+          if (link) link.click();
+          else location.assign("/new");
+          result = "ok";
+          break;
+        case "more": result = press(c.header && find('button[aria-label^="More options"]', c.header), "chat menu"); break;
+        case "plus": result = press(find('button[aria-label="Add files, connectors, and more"]'), "+ button"); break;
+        case "model": result = press(find('button[aria-label^="Model:"]'), "model button"); break;
+        case "dictate": result = press(find('button[aria-label="Dictate"]'), "dictate button"); break;
+        case "voice": result = press(find('button[aria-label="Use voice mode"]'), "voice button"); break;
+        case "stop": result = press(c.composer && stopButton(c.composer), "stop button"); break;
+        case "send": return sendText(String(arg || ""));
+        default: result = "unknown action " + name;
+      }
+      if (result !== "ok") record("chrome", name + ": " + result);
+      nativeSetTimeout(updateChrome, 50);
+      return result;
+    }
+  };
+
+  function startChrome() {
+    var style = document.createElement("style");
+    style.textContent = "html.app-native-chrome [data-app-hidden]{opacity:0!important;pointer-events:none!important}";
+    (document.head || document.documentElement).appendChild(style);
+    var pending = null;
+    var schedule = function () {
+      if (pending) return;
+      pending = nativeSetTimeout(function () { pending = null; updateChrome(); }, 120);
+    };
+    try {
+      new NativeObserver(schedule).observe(document.body, {
+        childList: true, subtree: true, attributes: true, attributeFilter: ["aria-label", "disabled", "data-state"]
+      });
+    } catch (e) {}
+    document.addEventListener("touchend", function () { nativeSetTimeout(updateChrome, 350); }, { passive: true, capture: true });
+    setInterval(updateChrome, 1000);
+    updateChrome();
+  }
+
+  function chromeSummary() {
+    if (!NATIVE_CHROME) return ["native controls: off"];
+    var s = chromeState;
+    return ["native controls: on, " + (s.ready ? "in use" : "not in use (" + s.why + ")") +
+      (s.ready ? ", page " + s.page + ", sidebar " + (s.sidebarOpen ? "open" : "closed") +
+        ", answering " + (s.streaming ? "yes" : "no") + ", model " + (s.model || "?") + (s.effort ? " " + s.effort : "") : "")];
+  }
+
   function onReady() {
     domReady = true;
+    if (NATIVE_CHROME) startChrome();
     launch.dom = performance.now();
     pollLaunch();
     lockViewport();
