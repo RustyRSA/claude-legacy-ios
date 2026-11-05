@@ -147,6 +147,11 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   modules ran before the HTML was parsed (1.1 s). 7c: `patch.js` holds module runs
   until DOMContentLoaded, as a browser does for module scripts. (`ranAt` in the log is
   when a module was handed over, not when it ran.)
+- 7c result (log 5, 5 Nov 16:28): page works; send button 2.1 s (was 7.2–7.8 s), entry
+  code 0.1 s, 804 modules all from the store, none transpiled. Still seen: 4 API calls
+  "Load failed" (plugins, marketplaces, discoverable, subscription_details; also in the
+  7b first launch, not before 7b), IndexedDB state read rejected + uncaught
+  TransactionInactiveError (IDBCursor.continue), main thread blocked 1.2 s at 0.0 s.
 
 ### Round 06 (30 Oct 2026)
 - Fast loading (loader above) with in-page nonce execution; Advanced menu toggle.
@@ -269,7 +274,10 @@ analytics of its own (claude.ai itself runs Datadog RUM).
 
 | Item | Status |
 |---|---|
-| Launch ~10 s (log 1, round 06) | 07 app module store. Next: check the `storage:` line after the second launch; then main-thread stalls and the 14 API calls at launch |
+| Launch (send button) 7.2 s → 2.1 s | Done in 07c. Next: the 1.2 s main-thread block at start (transpiler + worker source parsed every launch even when nothing needs transpiling?) |
+| 4 API calls fail "Load failed" since 07b | Open. Rule out the app first (reply handler, module timing) before blaming claude.ai |
+| claude.ai IndexedDB read rejected | Still after the web caches were deleted, so maybe not the quota. TransactionInactiveError suggests transaction timing (async IIFE wrapping / polyfills); investigate |
+| Sign-in cookie missing at every launch | App copy restores it each time; find why WebKit drops it |
 | claude.ai storage full (log 2) | 07 moves transpiled code out and deletes the web caches; check claude.ai's IndexedDB warning is gone |
 | Send button / mic / chats appear late | Same as above (they appear when React hydrates); native chat list would bypass it |
 | Sidebar taps sometimes do nothing | 06 tap fix + "taps without a click" counter. Confirm with the log; if misses remain, look at the logged targets |
