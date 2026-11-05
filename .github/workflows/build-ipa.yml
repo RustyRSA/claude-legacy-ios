@@ -6,6 +6,16 @@ name: Build IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        # macos-14 when GitHub has no macos-15 machine free (the job then fails
+        # with "not acquired by Runner"). Both carry Xcode 16, selected below.
+        description: macOS machine type
+        type: choice
+        default: macos-15
+        options:
+          - macos-15
+          - macos-14
 
 permissions:
   contents: read
@@ -16,7 +26,7 @@ defaults:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 30
     steps:
       - name: Check out source (no saved credentials)
@@ -101,6 +111,7 @@ jobs:
             echo "| Source commit | \`$GITHUB_SHA\` |"
             echo "| Polyfills commit | \`$(git rev-parse HEAD:Polyfills)\` |"
             echo "| Xcode | $(xcodebuild -version | head -n 1) |"
+            echo "| Runner | ${{ inputs.runner || 'macos-15' }} ($(sw_vers -productVersion)) |"
             echo "| Minimum iOS | $MINOS |"
             echo "| SHA-256 | \`$SHA\` |"
           } >> "$GITHUB_STEP_SUMMARY"

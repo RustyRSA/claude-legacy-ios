@@ -99,7 +99,9 @@ balance in the `.m` files.
 `xcodebuild archive` with build.sh's flags, IPA packaged, then verified (every
 `ClaudeLegacy/*.js` byte-identical in the bundle, Polyfills folder identical,
 `vtool` minimum OS ≤ 16.3), SHA-256 printed (`IPA SHA-256: …`) and in the run
-summary, artifact `ClaudeLegacy-ipa`.
+summary, artifact `ClaudeLegacy-ipa`. Input `runner` (macos-15 default, macos-14) for when GitHub has no
+macos-15 machine free ("not acquired by Runner"): `gh workflow run build-ipa.yml -f runner=macos-14`,
+then `bash tools/update.sh --build-only` picks up that run.
 
 **`tools/update.sh`** (Git Bash, from the repo):
 `bash tools/update.sh [file.patch]` applies the newest `~/Downloads/claude-legacy-*.patch`
