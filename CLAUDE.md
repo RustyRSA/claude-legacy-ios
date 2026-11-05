@@ -134,6 +134,17 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | `312d524` | 07a | Packs in CacheStorage (failed: quota full) |
 | (next) | 07 | Launch: app module store outside claude.ai's storage, batched reads (see Loader) |
 
+### Round 10 (5 Nov 2026)
+- Log 9 storage report: `Library/Caches/WebKit/CacheStorage` 1,996 MB although claude.ai
+  has 0 web caches: the old transpiled caches, deleted while the networking process kept
+  crashing, left their files. That fills the origin quota (IndexedDB probe:
+  QuotaExceededError). NetworkCache 850 MB (WebKit HTTP cache, outside the quota),
+  module store 43 MB, WebsiteData (IndexedDB, local storage) 9 MB.
+- Fix: `-clearLeftoverWebCachesIfLarge` at launch: CacheStorage folder > 100 MB ->
+  `removeDataOfTypes:{WKWebsiteDataTypeFetchCache}` (web caches only), logged as an app event.
+- Chat open (log 9): the ~1 s wait was one new module being transpiled (1,032 ms); later
+  opens use the store. Idea for later: transpile direct dynamic imports in idle time.
+
 ### Round 09 (5 Nov 2026)
 - Debug log: `storage on disk` (native: Library/WebKit and Library/Caches folders of
   0.5 MB or more, 4 levels) to find what fills claude.ai's quota; page side lists

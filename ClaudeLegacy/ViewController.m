@@ -530,6 +530,46 @@ API_AVAILABLE(ios(14.0))
         [strongSelf presentQueuedURLIfAny];
 //        [_webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"http://192.168.1.136:3000"]]];
     }];
+    [self clearLeftoverWebCachesIfLarge];
+}
+
+/// claude.ai keeps no web caches (CacheStorage) of its own, and since round 7 the
+/// app keeps its modules in its own files, yet 2 GB of old web-cache files were
+/// still on disk (5 Nov 2026): the old caches were deleted while WebKit's
+/// networking process kept crashing, and their files were never cleaned up. They
+/// count against claude.ai's storage quota, which left IndexedDB without space.
+/// When that folder holds more than 100 MB, WebKit is asked to remove its web-cache
+/// data, and only that: cookies, IndexedDB and local storage stay.
+- (void)clearLeftoverWebCachesIfLarge {
+    NSURL *caches = [[NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory
+                                                          inDomains:NSUserDomainMask] firstObject];
+    NSURL *folder = [caches URLByAppendingPathComponent:@"WebKit/CacheStorage" isDirectory:YES];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        long long bytes = [weakSelf sizeOfFolder:folder];
+        if (bytes < 100LL * 1024 * 1024) {
+            return;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            NSDate *started = [NSDate date];
+            [strongSelf.webView.configuration.websiteDataStore removeDataOfTypes:[NSSet setWithObject:WKWebsiteDataTypeFetchCache]
+                                                                   modifiedSince:[NSDate distantPast]
+                                                               completionHandler:^{
+                NSTimeInterval seconds = -[started timeIntervalSinceNow];
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    long long left = [weakSelf sizeOfFolder:folder];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [weakSelf logEvent:[NSString stringWithFormat:@"web cache storage cleared: %.0f MB before, %.0f MB left, took %.1f s",
+                                            bytes / 1048576.0, left / 1048576.0, seconds]];
+                    });
+                });
+            }];
+        });
+    });
 }
 
 /// Adds a script that runs before anything on the page (in the order added).
