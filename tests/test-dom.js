@@ -35,8 +35,13 @@ class StrictSocket extends w.EventTarget {
 StrictSocket.made = [];
 StrictSocket.OPEN = 1;
 w.WebSocket = StrictSocket;
+// An IndexedDB transaction whose commit() would crash WebKit's networking process on iOS 16.3.
+let realCommits = 0;
+w.IDBTransaction = class { commit() { realCommits++; } };
 
 w.eval(src);
+new w.IDBTransaction().commit(); // as claude.ai does
+assert.strictEqual(realCommits, 0, "IndexedDB commit() reaches no further");
 w.__appPatchModule("export const x = 1;", "first-module.js"); // claude.ai code has started
 
 // Sockets: https -> wss for the voice session; already-wss untouched; bad still throws.
@@ -88,6 +93,7 @@ setTimeout(() => {
     console.log("---- debug log ----\n" + log + "\n-------------------");
     assert.ok(/taps measured: 1, page reacts after median \d+ ms/.test(log), "tap reaction measured");
     assert.ok(/frames after taps: [1-9]\d*, over 50 ms: \d+/.test(log), "frames watched");
+    assert.ok(/IndexedDB commit\(\) calls skipped: 1/.test(log), "skipped commit counted");
     assert.ok(/page-watching work: polyfills \d+ ms in \d+ calls .* claude\.ai \d+ ms in [1-9]\d* calls/.test(log), "observer cost split");
     assert.ok(!/Datadog/.test(log) && /Selected backend/.test(log));
     assert.strictEqual((log.match(/output Speaker/g) || []).length, 1);

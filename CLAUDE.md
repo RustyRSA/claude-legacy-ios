@@ -132,6 +132,20 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | `312d524` | 07a | Packs in CacheStorage (failed: quota full) |
 | (next) | 07 | Launch: app module store outside claude.ai's storage, batched reads (see Loader) |
 
+### Round 08b (5 Nov 2026) — networking process crash found
+- Phone crash reports (`/var/mobile/Library/Logs/CrashReporter`): 15 of 15
+  `com.apple.WebKit.Networking` crashes on 5 Nov (first 13:39) are the same:
+  EXC_BREAKPOINT in `WebCore::IDBServer::UniqueIDBDatabaseTransaction::commit`
+  (thread com.apple.WebKit.Storage). claude.ai calls `IDBTransaction.commit()`;
+  WebKit 16.3 asserts. The crash ~0.4 s after the page is usable explains, in one:
+  "Load failed" requests, "Connection to Indexed Database server lost", claude.ai
+  without persisted state, likely the send button only after Return (composer draft
+  in IndexedDB) and possibly sign-outs.
+- Fix: `app-tweaks.js` makes `IDBTransaction.prototype.commit` a no-op (a
+  transaction commits by itself once it has no requests left); count in the log.
+- Also: app crash 13:28 = camera access without `NSCameraUsageDescription`; added.
+- Crash reports can be pulled with: `scp "root@<phone>:/var/mobile/Library/Logs/CrashReporter/*<date>*" <folder>`.
+
 ### Round 08 (5 Nov 2026)
 - Log 6 (Logan: complete after 4–5 s with layout jumping, send button only after
   Return, sidebar slow, chat switch slow / sometimes 2 taps, edge strips flash on

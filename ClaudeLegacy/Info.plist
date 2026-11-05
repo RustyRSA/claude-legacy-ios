@@ -15,6 +15,8 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Claude uses the microphone for voice mode.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Claude uses the camera when you take a photo to add to a message.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

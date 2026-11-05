@@ -36,6 +36,25 @@
     if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
   }
 
+  // ---------------------------------------------------------------------------
+  // IndexedDB: no explicit commit
+  // ---------------------------------------------------------------------------
+  // On iOS 16.3, IDBTransaction.commit() as claude.ai calls it trips an
+  // assertion in WebKit's IndexedDB server (UniqueIDBDatabaseTransaction::commit),
+  // which takes down WebKit's whole networking process: every request in flight
+  // fails ("Load failed"), IndexedDB is gone until a reload ("Connection to
+  // Indexed Database server lost"), and claude.ai runs without its saved state
+  // (crash reports, 5 Nov 2026: 15 of 15 the same). commit() only asks for what
+  // happens anyway once a transaction has no requests left, so it does nothing here.
+  var idbCommits = 0;
+  try {
+    if (window.IDBTransaction && typeof IDBTransaction.prototype.commit === "function") {
+      IDBTransaction.prototype.commit = function () {
+        idbCommits += 1;
+      };
+    }
+  } catch (e) {}
+
   // Cheap descriptions only: the transpiler logs every module's exports, and
   // serialising those objects would slow every launch.
   function describe(value) {
@@ -594,7 +613,8 @@
       "frames after taps: " + longFrames.frames + ", over 50 ms: " + longFrames.count + " (worst " + round(longFrames.worst) + " ms)",
       "page-watching work: polyfills " + round(observerCost.early.ms) + " ms in " + observerCost.early.calls +
         " calls (worst " + round(observerCost.early.worst) + " ms), claude.ai " + round(observerCost.app.ms) + " ms in " +
-        observerCost.app.calls + " calls (worst " + round(observerCost.app.worst) + " ms)"
+        observerCost.app.calls + " calls (worst " + round(observerCost.app.worst) + " ms)",
+      "IndexedDB commit() calls skipped: " + idbCommits
     ];
   }
 
