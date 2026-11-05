@@ -21,6 +21,7 @@ var LegacyTranspiler = (() => {
   // src/index.ts
   var index_exports = {};
   __export(index_exports, {
+    buildPacks: () => buildPacks,
     exportModule: () => exportModule,
     getModuleExports: () => getModuleExports,
     importModule: () => importModule,
@@ -8384,10 +8385,28 @@ var LegacyTranspiler = (() => {
   //  - stores compact (minified) output in its own cache and removes caches and
   //    entries that are no longer used, so storage does not fill up.
   // Timings for every module are kept for the app's debug log (stats()).
+  // Round 7: on iOS every cache read has a large fixed cost, so ~700 separate
+  // reads at boot kept the entry module waiting for seconds. The modules a
+  // launch runs first are now also stored as a few large "packs" in a small
+  // cache of their own (buildPacks), read in launch order at boot, and cache
+  // reads go through a queue where modules the page is waiting for go first.
   var CACHE_NAME = "transpiled-v".concat(version2);
   var FAST_CACHE_NAME = "transpiled-fast-v".concat(version2, "-1");
+  var PACK_CACHE_NAME = FAST_CACHE_NAME + "-packs";
+  var PACK_ORIGIN = "https://claude-legacy.invalid/pack/";
+  var PACK_MAGIC = "//@pack 1\n";
+  var PACK_CHARS = 2e6;
+  var PACK_BOOT_MS = 1e4;
+  var PACK_WINDOW_MS = 2e4;
+  var READ_LIMIT = 6;
   var DEPS_PREFIX = "//@deps ";
   var _cachePromise = null;
+  var _packCachePromise = null;
+  var _packId = "";
+  var _packOf = /* @__PURE__ */ new Map();
+  var _packReads = [];
+  var _readQueue = [];
+  var _readsActive = 0;
   var _pending = /* @__PURE__ */ new Map();
   var _records = /* @__PURE__ */ new Map();
   var _order = [];
@@ -8407,7 +8426,17 @@ var LegacyTranspiler = (() => {
     workers: 0,
     workerError: "",
     pruned: 0,
-    cachesRemoved: 0
+    cachesRemoved: 0,
+    cacheOpenMs: 0,
+    packCacheOpenMs: 0,
+    packs: 0,
+    packsRead: 0,
+    packHits: 0,
+    packMs: 0,
+    firstPackAt: 0,
+    packError: "",
+    packsBuilt: 0,
+    packBuildMs: 0
   };
   function nowMs() {
     return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
@@ -8430,13 +8459,199 @@ var LegacyTranspiler = (() => {
     const opening = (async () => {
       if (typeof caches === "undefined") return null;
       try {
-        return await caches.open(name);
+        const t0 = nowMs();
+        const cache = await caches.open(name);
+        if (isFast()) _stats.cacheOpenMs = nowMs() - t0;
+        return cache;
       } catch {
         return null;
       }
     })();
     if (isFast()) _cachePromise = opening;
     return opening;
+  }
+  function openPackCache() {
+    if (_packCachePromise) return _packCachePromise;
+    _packCachePromise = (async () => {
+      if (typeof caches === "undefined") return null;
+      try {
+        const t0 = nowMs();
+        const cache = await caches.open(PACK_CACHE_NAME);
+        _stats.packCacheOpenMs = nowMs() - t0;
+        return cache;
+      } catch {
+        return null;
+      }
+    })();
+    return _packCachePromise;
+  }
+  // ---- Cache read queue ------------------------------------------------------
+  // At most READ_LIMIT reads at a time, in order of priority: reads the page
+  // is waiting for (0), then packs (1), then head starts (2), each in the order
+  // asked. promoteRead moves a read to 0, also one not queued yet.
+  var _promoted = /* @__PURE__ */ new Set();
+  function queuedRead(key, priority, task) {
+    return new Promise((resolve, reject) => {
+      const item = { key, priority: _promoted.has(key) ? 0 : priority, task, resolve, reject };
+      insertRead(item);
+      pumpReads();
+    });
+  }
+  function insertRead(item) {
+    const index = _readQueue.findIndex((other) => other.priority > item.priority);
+    if (index < 0) _readQueue.push(item);
+    else _readQueue.splice(index, 0, item);
+  }
+  function promoteRead(key) {
+    _promoted.add(key);
+    const index = _readQueue.findIndex((item) => item.key === key);
+    if (index < 0 || _readQueue[index].priority === 0) return;
+    const item = _readQueue.splice(index, 1)[0];
+    item.priority = 0;
+    insertRead(item);
+  }
+  function pumpReads() {
+    while (_readsActive < READ_LIMIT && _readQueue.length) {
+      const item = _readQueue.shift();
+      _readsActive += 1;
+      Promise.resolve().then(item.task).then(item.resolve, item.reject).then(() => {
+        _readsActive -= 1;
+        pumpReads();
+      });
+    }
+  }
+  // ---- Packs -----------------------------------------------------------------
+  // A pack is PACK_MAGIC followed by, per module: its address, a newline, the
+  // length of its code, a newline, then the code itself.
+  function packKey(id, index) {
+    return PACK_ORIGIN + id + "/" + index;
+  }
+  function parsePack(text) {
+    if (!text.startsWith(PACK_MAGIC)) return null;
+    const out = /* @__PURE__ */ new Map();
+    let pos = PACK_MAGIC.length;
+    while (pos < text.length) {
+      const a = text.indexOf("\n", pos);
+      const b = a < 0 ? -1 : text.indexOf("\n", a + 1);
+      if (b < 0) return null;
+      const length = Number(text.slice(a + 1, b));
+      if (!(length >= 0) || b + 1 + length > text.length) return null;
+      out.set(text.slice(pos, a), text.slice(b + 1, b + 1 + length));
+      pos = b + 1 + length;
+    }
+    return out;
+  }
+  function startPacks(index) {
+    if (!index || typeof index.id !== "string" || !Array.isArray(index.lists)) return;
+    _packId = index.id;
+    index.lists.forEach((list, i) => {
+      if (!Array.isArray(list)) return;
+      for (const src of list) {
+        if (typeof src === "string" && !_packOf.has(src)) _packOf.set(src, i);
+      }
+      _packReads[i] = readPack(i);
+      _stats.packs += 1;
+    });
+  }
+  async function readPack(i) {
+    const cache = await openPackCache();
+    if (!cache) return null;
+    try {
+      return await queuedRead("pack:" + i, 1, async () => {
+        const t0 = nowMs();
+        const hit = await cache.match(packKey(_packId, i));
+        if (!hit) {
+          _stats.packError = "pack " + i + " missing";
+          return null;
+        }
+        const map = parsePack(await hit.text());
+        if (!map) {
+          _stats.packError = "pack " + i + " damaged";
+          return null;
+        }
+        _stats.packMs += nowMs() - t0;
+        _stats.packsRead += 1;
+        if (!_stats.firstPackAt) _stats.firstPackAt = nowMs();
+        return map;
+      });
+    } catch (e) {
+      _stats.packError = String(e && e.name || e);
+      return null;
+    }
+  }
+  // A module's code from its pack, or null (not packed, or the pack is gone).
+  // Code is handed out once, so the pack's memory goes as modules run.
+  async function readFromPack(src) {
+    const i = _packOf.get(src);
+    if (i === void 0 || !_packReads[i]) return null;
+    const map = await _packReads[i];
+    if (!map || !map.has(src)) return null;
+    const code = map.get(src);
+    map.delete(src);
+    _packOf.delete(src);
+    return code;
+  }
+  // Rewrites the packs from the modules this launch ran in its first
+  // PACK_WINDOW_MS, in the order they ran, when the current packs (index from
+  // the last build) miss any module run in the first PACK_BOOT_MS or hold far
+  // more than is used. Returns the new index for the app to keep, or null.
+  async function buildPacks(current) {
+    if (!isFast() || typeof caches === "undefined") return null;
+    const ran = _order.filter((r) => r.ranAt && !r.src.includes("intercom")).sort((a, b) => a.ranAt - b.ranAt);
+    const boot = ran.filter((r) => r.ranAt - _stats.startedAt <= PACK_BOOT_MS).map((r) => r.src);
+    const wanted = ran.filter((r) => r.ranAt - _stats.startedAt <= PACK_WINDOW_MS).map((r) => r.src);
+    if (!boot.length) return null;
+    const have = /* @__PURE__ */ new Set();
+    let total = 0;
+    if (current && Array.isArray(current.lists)) {
+      for (const list of current.lists) {
+        if (!Array.isArray(list)) continue;
+        for (const src of list) {
+          have.add(src);
+          total += 1;
+        }
+      }
+    }
+    if (current && current.id && !_stats.packError && boot.every((src) => have.has(src)) && total <= wanted.length * 2) {
+      return null;
+    }
+    const t0 = nowMs();
+    try {
+      const cache = await openPackCache();
+      if (!cache) return null;
+      const id = String(Date.now());
+      const lists = [];
+      let list = [];
+      let parts = [PACK_MAGIC];
+      let size = 0;
+      const flush = async () => {
+        if (!list.length) return;
+        await cache.put(packKey(id, lists.length), new Response(parts.join("")));
+        lists.push(list);
+        list = [];
+        parts = [PACK_MAGIC];
+        size = 0;
+      };
+      for (const src of wanted) {
+        const code = await readFromCache(src, false);
+        if (code === null) continue;
+        list.push(src);
+        parts.push(src, "\n", String(code.length), "\n", code);
+        size += code.length;
+        if (size >= PACK_CHARS) await flush();
+      }
+      await flush();
+      if (!lists.length) return null;
+      for (const request of await cache.keys()) {
+        if (!request.url.startsWith(PACK_ORIGIN + id + "/")) await cache.delete(request);
+      }
+      _stats.packsBuilt = lists.length;
+      _stats.packBuildMs = nowMs() - t0;
+      return { id, lists };
+    } catch (e) {
+      _stats.packError = "build: " + String(e && e.name || e);
+      return null;
+    }
   }
   function depsOf(code) {
     if (code.indexOf(DEPS_PREFIX, 0) < 0) return [];
@@ -8457,16 +8672,19 @@ var LegacyTranspiler = (() => {
       });
     }
   }
-  async function readFromCache(src) {
+  async function readFromCache(src, urgent) {
     const cache = await openCache();
     if (!cache) return null;
-    try {
+    const read = async () => {
       const t0 = nowMs();
       const hit = await cache.match(src);
       if (!hit) return null;
       const code = await hit.text();
       _stats.readMs += nowMs() - t0;
       return code;
+    };
+    try {
+      return await queuedRead(src, urgent ? 0 : 2, read);
     } catch {
       return null;
     }
@@ -8482,7 +8700,9 @@ var LegacyTranspiler = (() => {
   }
   // Fast mode: everything needed to get one module's transpiled code.
   async function obtainCode(src, speculative) {
-    const cached = await readFromCache(src);
+    let cached = await readFromPack(src);
+    if (cached !== null) _stats.packHits += 1;
+    else cached = await readFromCache(src, !speculative);
     if (cached !== null) {
       _stats.hits += 1;
       warm(depsOf(cached));
@@ -8618,7 +8838,7 @@ var LegacyTranspiler = (() => {
     if (typeof caches === "undefined") return;
     caches.keys().then((names) => {
       for (const name of names) {
-        if (name.startsWith("transpiled") && name !== FAST_CACHE_NAME) {
+        if (name.startsWith("transpiled") && name !== FAST_CACHE_NAME && name !== PACK_CACHE_NAME) {
           caches.delete(name).then((ok) => {
             if (ok) _stats.cachesRemoved += 1;
           });
@@ -8656,6 +8876,9 @@ var LegacyTranspiler = (() => {
       let pending = _pending.get(src);
       let result = null;
       if (pending) {
+        // The page now waits for this one: its queued read goes first.
+        promoteRead(src);
+        if (_packOf.has(src)) promoteRead("pack:" + _packOf.get(src));
         try {
           result = await pending;
         } catch {
@@ -8703,6 +8926,8 @@ var LegacyTranspiler = (() => {
     _stats.startedAt = nowMs();
     if (isFast()) {
       startWorkers();
+      // Packs first: they hold the modules the last launch ran first.
+      startPacks(options.packs);
       // Read what the last launch used, without downloading anything for it:
       // after a claude.ai update most of those files are no longer requested.
       for (const src of options.manifest || []) {
@@ -8721,6 +8946,8 @@ var LegacyTranspiler = (() => {
     for (const src of Array.from(_pending.keys())) {
       if (!loaded.has(src)) _pending.delete(src);
     }
+    _packOf.clear();
+    _packReads = [];
   }
   function exportModule(source, exports) {
     const done = _records.get(source);

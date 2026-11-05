@@ -60,6 +60,12 @@ Modules run in one of two ways (`patch.js`):
   after 45 s, caches/entries not used by the last 3 launches
   (`__appModuleHistory`) are deleted. Execution order is unchanged.
 - `LegacyTranspiler.stats()` feeds the launch section of the debug log.
+- Packs (round 7): modules run in the first 20 s are also stored, in start order,
+  as ~2 MB packs in cache `transpiled-fast-v0.1.24-1-packs` (index in
+  `localStorage.__appModulePacks`), rebuilt at 45 s when a module run in the first
+  10 s is missing. Boot reads the packs; the module cache is opened only for the
+  rest. All cache reads go through a queue (6 at a time): waited-for reads, then
+  packs, then head starts.
 
 ## Files
 
@@ -119,7 +125,17 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | `3fda3ec` | 03 | update.sh: fork targeting, build reuse, no-reply author |
 | `9c99976` | 04 | Voice mode works: https→wss WebSocket conversion (Safari 16 throws on https: socket URLs), PCM recording patch |
 | `7e8e00c` | 05 | Full-bleed icon (no white flash), launch colours, smoother edge colours, steady composer (overscroll), tap tweaks |
-| (next) | 06 | This round, see below |
+| `332633c` | 06 | Fast loading, launch timeline, sign-in protection, crash reload, bridge security, page size, tap fix |
+| (next) | 07 | Launch: module packs + prioritised cache reads (see Loader) |
+
+### Round 07 (5 Nov 2026)
+- Launch log 1 (31 Oct, round 06): 705 modules all from cache, none transpiled,
+  yet first module at 5.0 s, last 9.6 s, cache reads summing to 80 s. Cause taken
+  to be ~700 separate CacheStorage reads queued at once (iOS cost per read).
+- Fix: packs + read queue (Loader). Debug log adds a `packs:` line (packs read,
+  first ready, modules from packs, cache open times, entry code ready, rebuilds).
+- First launch after installing builds the packs at 45 s; the gain shows from the
+  second launch.
 
 ### Round 06 (30 Oct 2026)
 - Fast loading (loader above) with in-page nonce execution; Advanced menu toggle.
@@ -242,7 +258,7 @@ analytics of its own (claude.ai itself runs Datadog RUM).
 
 | Item | Status |
 |---|---|
-| Launch ~15 s every time | 06 adds fast loading + full timeline. Next: read Logan's debug log after a second launch; fix whatever dominates (transpile, cache saves failing, evaluation, a long timer, API calls) |
+| Launch ~10 s (log 1, round 06) | 07 packs. Next: check the `packs:` line after the second launch; then main-thread stalls (1.05 s @4.9 s) and the 14 API calls at launch |
 | Send button / mic / chats appear late | Same as above (they appear when React hydrates); native chat list would bypass it |
 | Sidebar taps sometimes do nothing | 06 tap fix + "taps without a click" counter. Confirm with the log; if misses remain, look at the logged targets |
 | Chat switch ~2 s | 06 logs address/data/settled times; decide between API and rendering |

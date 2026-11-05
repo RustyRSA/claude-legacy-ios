@@ -934,6 +934,15 @@
         ", cache saves failed " + s.putFailures + (s.putError ? " (" + s.putError + ")" : "") +
         ", old entries removed " + s.pruned + ", old caches removed " + s.cachesRemoved
     ];
+    if (s.packs !== undefined) {
+      var first = mods[0];
+      out.push("  packs: " + s.packsRead + " of " + s.packs + " read in " + Math.round(s.packMs) + " ms (first ready " +
+        seconds(s.firstPackAt) + "), " + s.packHits + " modules from packs, cache opened in " + Math.round(s.cacheOpenMs) +
+        " ms (packs " + Math.round(s.packCacheOpenMs) + " ms), entry code ready " +
+        (first && first.codeAt ? seconds(first.codeAt) : "not seen") +
+        (s.packsBuilt ? ", rebuilt " + s.packsBuilt + " packs in " + Math.round(s.packBuildMs) + " ms" : "") +
+        (s.packError ? " (" + s.packError + ")" : ""));
+    }
     var slow = mods.filter(function (m) { return m.ranAt && m.codeAt; })
       .sort(function (a, b) { return (b.ranAt - b.codeAt) - (a.ranAt - a.codeAt); }).slice(0, 5)
       .map(function (m) { return String(m.src).split("/").pop() + " " + Math.round(m.ranAt - m.codeAt) + " ms"; });

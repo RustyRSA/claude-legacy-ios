@@ -8,6 +8,7 @@
   const FAST = settings.fastLoad !== false;
   const MANIFEST_KEY = "__appModuleManifest";
   const HISTORY_KEY = "__appModuleHistory";
+  const PACKS_KEY = "__appModulePacks";
 
   const status = (payload) => {
     try {
@@ -145,12 +146,18 @@
 
   try {
     let manifest = [];
+    let packs = null;
     if (FAST) {
       try {
         manifest = JSON.parse(localStorage.getItem(MANIFEST_KEY) || "[]");
         if (!Array.isArray(manifest)) manifest = [];
       } catch (e) {
         manifest = [];
+      }
+      try {
+        packs = JSON.parse(localStorage.getItem(PACKS_KEY) || "null");
+      } catch (e) {
+        packs = null;
       }
     }
 
@@ -159,6 +166,7 @@
       fast: FAST,
       minify: FAST,
       manifest: manifest,
+      packs: packs,
       workerSource: FAST ? window.__appWorkerSource : undefined,
       workerCount: 2,
       runScript: (code, src) => {
@@ -225,8 +233,20 @@
         history.forEach((h) => keep.push.apply(keep, h.used));
         LT.pruneCache(keep);
         LT.releaseUnused();
+        buildPacks();
       }
     } catch (e) {}
+  };
+  // The next launch reads the modules this one ran first as a few packs.
+  const buildPacks = () => {
+    if (typeof LT.buildPacks !== "function") return;
+    let current = null;
+    try {
+      current = JSON.parse(localStorage.getItem(PACKS_KEY) || "null");
+    } catch (e) {}
+    LT.buildPacks(current).then((index) => {
+      if (index) localStorage.setItem(PACKS_KEY, JSON.stringify(index));
+    }).catch(() => {});
   };
   setTimeout(() => saveUsage(true), 45000);
   document.addEventListener("visibilitychange", () => {
