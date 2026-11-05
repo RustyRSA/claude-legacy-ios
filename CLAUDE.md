@@ -144,6 +144,11 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   `removeDataOfTypes:{WKWebsiteDataTypeFetchCache}` (web caches only), logged as an app event.
 - Chat open (log 9): the ~1 s wait was one new module being transpiled (1,032 ms); later
   opens use the store. Idea for later: transpile direct dynamic imports in idle time.
+- Result (log 10, 18:18): "web cache storage cleared: 1996 MB before, 0 MB left, took
+  4.3 s"; IndexedDB probe ok; all 14 launch API calls 200; read-ahead 346 modules (9
+  batches, was 800); send button 2.0 s. Still: main thread blocked 1.2 s at 0.0 s,
+  0.6 s at 1.5 s, 0.9 s at 3.4 s; sign-in cookie missing at every launch (restored by
+  the app); NetworkCache 850 MB (WebKit-managed, outside the quota).
 
 ### Round 09 (5 Nov 2026)
 - Debug log: `storage on disk` (native: Library/WebKit and Library/Caches folders of
