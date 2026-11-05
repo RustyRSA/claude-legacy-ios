@@ -82,6 +82,7 @@ setTimeout(() => {
     console.log("after tap + overlay:", JSON.stringify(last));
     assert.ok(posted.length > before, "a new report followed the tap");
     assert.deepStrictEqual(last.top, { r: 15, g: 15, b: 15 }, "overlay blended over the header (50% black over 30)");
+    assert.ok(posted.every((p) => [30, 15].includes(p.top.r)), "only settled colours sent: " + JSON.stringify(posted.map((p) => p.top.r)));
 
     const log = w.__appDebugLog();
     console.log("---- debug log ----\n" + log + "\n-------------------");
@@ -94,4 +95,4 @@ setTimeout(() => {
     console.log("DOM PASS");
     process.exit(0);
   }, 700);
-}, 50);
+}, 200); // the first report waits 120 ms for a second look

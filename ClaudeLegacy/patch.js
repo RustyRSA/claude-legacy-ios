@@ -10,6 +10,7 @@
   const HISTORY_KEY = "__appModuleHistory";
   // Set once the old web caches are gone (transpiled code now lives in the app).
   const MIGRATED_KEY = "__appStoreMigrated";
+  const BOOT_MS = 6000;
 
   const status = (payload) => {
     try {
@@ -249,7 +250,10 @@
     try {
       const used = LT.usedModules();
       if (!used.length) return;
-      if (prune) localStorage.setItem(MANIFEST_KEY, JSON.stringify(used.slice(0, 800)));
+      // The next launch reads ahead only what this one needed in its first
+      // seconds; reading every module it ever used (800, 40 MB) at once slowed
+      // the start down. The rest is read from the app's store when asked for.
+      if (prune) localStorage.setItem(MANIFEST_KEY, JSON.stringify(LT.usedModules(BOOT_MS).slice(0, 800)));
       let history = [];
       try {
         history = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");

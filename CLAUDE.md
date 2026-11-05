@@ -132,6 +132,19 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | `312d524` | 07a | Packs in CacheStorage (failed: quota full) |
 | (next) | 07 | Launch: app module store outside claude.ai's storage, batched reads (see Loader) |
 
+### Round 08 (5 Nov 2026)
+- Log 6 (Logan: complete after 4–5 s with layout jumping, send button only after
+  Return, sidebar slow, chat switch slow / sometimes 2 taps, edge strips flash on
+  chat change): boot read all 800 stored modules (40 MB, batches done at 7.2 s);
+  273 new modules transpiled on first chat opens; 1 of 10 chat-list taps no click.
+- Read ahead only modules asked for in the first 6 s (`usedModules(BOOT_MS)`); the
+  rest is read from the store on demand.
+- Edge colours: a new colour is sent only when a second sample 120 ms later agrees.
+- Diagnostics: plain objects in warnings show error fields (was "[object Object]");
+  failed requests logged with error, cancelled?, store requests open; composer event
+  kinds vs send-button state (no text); IndexedDB probe at 3 s; chat-open data
+  detection also matches `chat_conversations_v2`.
+
 ### Round 07 (5 Nov 2026)
 - Log 1 (31 Oct, round 06): 705 modules all from cache, first module 5.0 s, last 9.6 s.
 - 07a (packs in CacheStorage), log 2: storage quota full — 172 cache saves failed,

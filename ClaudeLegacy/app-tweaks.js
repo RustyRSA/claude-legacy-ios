@@ -46,10 +46,27 @@
     if (value instanceof Error) return value.name + ": " + value.message;
     if (Array.isArray(value)) return "[Array(" + value.length + ")]";
     try {
-      return Object.prototype.toString.call(value);
+      if (typeof value.message === "string") return (value.name || "Error") + ": " + value.message;
+      var tag = Object.prototype.toString.call(value);
+      return tag === "[object Object]" ? describeFields(value) : tag;
     } catch (e) {
       return "[object]";
     }
+  }
+  // A plain object (often an error wrapped by claude.ai): its field names, and
+  // the values only of fields that describe an error, never other text.
+  var ERROR_FIELDS = /^(name|message|code|type|reason|status|error)$/;
+  function describeFields(value) {
+    var keys = Object.keys(value).slice(0, 8);
+    return "{" + keys.map(function (key) {
+      var v = value[key];
+      if (!ERROR_FIELDS.test(key)) return key;
+      if (v && typeof v === "object" && typeof v.message === "string") return key + ": " + (v.name || "Error") + ": " + v.message;
+      if (v && typeof v === "object" && v.target && v.target.error) return key + ": " + describe(v.target.error);
+      if (typeof v === "string") return key + ": " + v.slice(0, 120);
+      if (typeof v === "number" || typeof v === "boolean") return key + ": " + v;
+      return key + ": " + Object.prototype.toString.call(v);
+    }).join(", ") + "}";
   }
 
   function describeAll(args) {
@@ -456,6 +473,8 @@
   // Samples just inside the page's top and bottom edges, near the left side so
   // centred controls (the message box) do not decide the colour.
   var lastReported = "";
+  var candidate = "";
+  var confirmTimer = null;
   function reportAppearance() {
     if (!document.body) return;
     var report = null;
@@ -469,7 +488,20 @@
     }
     if (!report) return;
     var key = JSON.stringify(report);
-    if (key === lastReported) return;
+    if (key === lastReported) {
+      candidate = "";
+      return;
+    }
+    // A colour seen once may be one frame of an animation (the sidebar sliding
+    // away, one chat replaced by the next), which made the edges flash. It is
+    // passed on only when a second look a moment later sees the same.
+    if (key !== candidate) {
+      candidate = key;
+      clearTimeout(confirmTimer);
+      confirmTimer = (nativeSetTimeout || setTimeout)(reportAppearance, 120);
+      return;
+    }
+    candidate = "";
     lastReported = key;
     try {
       window.webkit.messageHandlers.appearance.postMessage(report);
@@ -747,7 +779,7 @@
     if (startedAt < 60000 && apiAtLaunch.length < 40) {
       apiAtLaunch.push({ path: path, method: method, at: startedAt, ms: ms, status: status });
     }
-    if (chatOpen && !chatOpen.dataAt && method === "GET" && /\/chat_conversations\/…$/.test(path) &&
+    if (chatOpen && !chatOpen.dataAt && method === "GET" && /\/chat_conversations(_v\d+)?\/…/.test(path) &&
         String(url).indexOf(String(chatOpen.href).split("/").pop()) !== -1) {
       chatOpen.dataAt = now;
       chatOpen.apiMs = ms;
@@ -767,6 +799,20 @@
       });
     }
   }
+  // Requests that fail without an answer ("Load failed"): whether the page
+  // cancelled them, and how busy the bridge to the app's module store was.
+  var failedRequests = 0;
+  function noteFailedRequest(path, method, startedAt, error, init) {
+    if (++failedRequests > 12) return;
+    var aborted = !!(init && init.signal && init.signal.aborted);
+    var store = loaderStats();
+    var s = store ? store.stats : {};
+    record("net", method + " " + path.replace(/^\/api\//, "") + " failed after " + Math.round(performance.now() - startedAt) +
+      " ms: " + describe(error) + (aborted ? ", cancelled by the page" : "") +
+      (document.visibilityState === "hidden" ? ", page hidden" : "") +
+      ", store requests open " + (s.storeInFlight || 0) + ", batches read " + (s.batchesRead || 0) + "/" + (s.batches || 0));
+  }
+
   var nativeFetch = window.fetch;
   if (typeof nativeFetch === "function") {
     window.fetch = function (input, init) {
@@ -778,8 +824,9 @@
         var startedAt = performance.now();
         promise.then(function (response) {
           noteApi(path, method, startedAt, response.status, response, url);
-        }, function () {
+        }, function (error) {
           noteApi(path, method, startedAt, "failed", null, url);
+          noteFailedRequest(path, method, startedAt, error, init);
         });
       }
       return promise;
@@ -1095,6 +1142,10 @@
     }
     // Page navigations inside the app can change the header colour too.
     setInterval(reportAppearance, 2000);
+    ["beforeinput", "input", "compositionstart", "compositionend", "keydown"].forEach(function (type) {
+      document.addEventListener(type, watchComposer, true);
+    });
+    nativeSetTimeout(probeIndexedDB, 3000);
     // Chat-opening timings need to know when the screen last changed.
     try {
       if (document.body && typeof NativeObserver === "function") {
@@ -1103,6 +1154,76 @@
         }).observe(document.body, { childList: true, subtree: true, characterData: true });
       }
     } catch (e) {}
+  }
+
+  // Typing in the message box: when claude.ai shows its send button. Only the
+  // kind of each event is noted, never what was typed.
+  var composerNotes = 0;
+  function sendButtonState() {
+    var button = document.querySelector('button[aria-label="Send message"]');
+    if (!button) return "none";
+    var box = button.getBoundingClientRect();
+    var style = getComputedStyle(button);
+    if (!box.width || style.visibility === "hidden" || style.display === "none" || Number(style.opacity) < 0.1) return "hidden";
+    return button.disabled ? "disabled" : "shown";
+  }
+  function watchComposer(event) {
+    if (composerNotes >= 16) return;
+    if (event.type === "keydown" && event.key !== "Enter") return;
+    var target = event.target;
+    if (!target || !target.closest || !target.closest('[contenteditable="true"], textarea')) return;
+    composerNotes++;
+    var kind = event.type + (event.inputType ? " " + event.inputType : "") + (event.isComposing ? " (composing)" : "") +
+      (event.key === "Enter" ? " Enter" : "");
+    var before = sendButtonState();
+    nativeSetTimeout(function () {
+      record("type", kind + ": send button " + before + ", 300 ms later " + sendButtonState());
+    }, 300);
+  }
+
+  // claude.ai reports its IndexedDB reads as refused: does IndexedDB work at
+  // all here? A throwaway database is opened, written, read and deleted.
+  function probeIndexedDB() {
+    var t0 = performance.now();
+    var done = function (text) {
+      record("idb", "probe " + text + " in " + Math.round(performance.now() - t0) + " ms");
+    };
+    try {
+      if (!window.indexedDB) return done("unavailable");
+      var request = indexedDB.open("__app_probe", 1);
+      request.onupgradeneeded = function () { request.result.createObjectStore("s"); };
+      request.onerror = function () { done("open failed: " + describe(request.error)); };
+      request.onblocked = function () { done("open blocked"); };
+      request.onsuccess = function () {
+        var db = request.result;
+        try {
+          var tx = db.transaction("s", "readwrite");
+          tx.objectStore("s").put(1, "k");
+          tx.oncomplete = function () {
+            var read = db.transaction("s", "readonly").objectStore("s").get("k");
+            read.onsuccess = function () {
+              db.close();
+              indexedDB.deleteDatabase("__app_probe");
+              done(read.result === 1 ? "ok" : "read back wrong value");
+            };
+            read.onerror = function () { db.close(); done("read failed: " + describe(read.error)); };
+          };
+          tx.onerror = function () { db.close(); done("write failed: " + describe(tx.error)); };
+        } catch (e) {
+          db.close();
+          done("failed: " + describe(e));
+        }
+      };
+      if (indexedDB.databases) {
+        indexedDB.databases().then(function (list) {
+          record("idb", list.length + " databases on claude.ai");
+        }, function (e) {
+          record("idb", "database list failed: " + describe(e));
+        });
+      }
+    } catch (e) {
+      done("failed: " + describe(e));
+    }
   }
 
   // Apply the page size as soon as claude.ai's viewport tag is parsed, so the

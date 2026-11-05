@@ -133,6 +133,7 @@ function run({ fast, caches, manifest, store, migrate, workers = true, workerBre
   assert.ok(!/\n {2}/.test(indexCode.split("\n").slice(2).join("\n")), "minified output");
   assert.ok(!/\(\?<=/.test(fastStore.get(BASE + "/c.js")), "lookbehind removed");
   const manifest = first.LT.usedModules();
+  assert.deepStrictEqual(first.LT.usedModules(60000), manifest, "all asked for within a minute");
   assert.strictEqual(manifest.map((u) => u.split("/").pop()).join(","), "index.js,a.js,c.js,b.js,d.js");
 
   // Second launch: all from cache, read in advance, nothing downloaded.
@@ -178,6 +179,7 @@ function run({ fast, caches, manifest, store, migrate, workers = true, workerBre
   assert.deepStrictEqual(fromStore.fetched, []);
   assert.deepStrictEqual(caches.opened, [], "web cache untouched");
   assert.deepStrictEqual(store.calls, ["get"], "one request to the app: " + store.calls);
+  assert.strictEqual(s5.storeInFlight, 0, "no store requests left open");
 
   // Empty store, nothing to move: transpiled in workers and saved in the store.
   const fresh = makeStore();

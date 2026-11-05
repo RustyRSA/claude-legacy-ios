@@ -8434,7 +8434,8 @@ var LegacyTranspiler = (() => {
     migrated: 0,
     storeError: "",
     storeFiles: 0,
-    storeBytes: 0
+    storeBytes: 0,
+    storeInFlight: 0
   };
   function nowMs() {
     return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
@@ -8446,7 +8447,13 @@ var LegacyTranspiler = (() => {
     return isFast() && !!(options.store && typeof options.store.call === "function");
   }
   function storeCall(op, extra) {
-    return Promise.resolve().then(() => options.store.call(Object.assign({ op, dir: FAST_CACHE_NAME }, extra)));
+    _stats.storeInFlight += 1;
+    const done = () => {
+      _stats.storeInFlight -= 1;
+    };
+    const call = Promise.resolve().then(() => options.store.call(Object.assign({ op, dir: FAST_CACHE_NAME }, extra)));
+    call.then(done, done);
+    return call;
   }
   function record(src) {
     let r = _records.get(src);
@@ -8818,8 +8825,11 @@ var LegacyTranspiler = (() => {
       modules: _order.map((r) => Object.assign({}, r))
     };
   }
-  function usedModules() {
-    return _order.map((r) => r.src);
+  // withinMs: only modules first asked for that long after the start (the
+  // launch's own; later ones are read when needed).
+  function usedModules(withinMs) {
+    const list = withinMs ? _order.filter((r) => r.requestedAt - _stats.startedAt <= withinMs) : _order;
+    return list.map((r) => r.src);
   }
   async function loadCode(src = "") {
     if (src.includes("intercom") || loaded.has(src)) {
