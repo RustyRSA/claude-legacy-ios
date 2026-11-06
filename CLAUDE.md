@@ -135,7 +135,7 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | (next) | 07 | Launch: app module store outside claude.ai's storage, batched reads (see Loader) |
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
-- Goal (Logan): look and feel of the iPhone app (references: `C:Claudeclaudeioslegacyeference`,
+- Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
   App Store + Mobbin screenshots). Use Apple's own iOS 16 controls (UIKit, SF Symbols, New York
   serif), no liquid-glass imitation; no assets taken from the official app.
 - `NativeChrome` (ViewController.m, iOS 15+): round menu button (top left), ghost incognito
@@ -447,7 +447,6 @@ the app opens and asks before loading the same claude.ai address.
 
 ## Docs
 
+- Phone crash logs Logan copies over go in `phone-logs/` (local only, excluded from Git).
 - Improvement brief (Logan's requirements, 30 Oct 2026):
   https://claude.ai/artifact/3nmgWJ7EAbMikizsDSEx9Y
-- Project inbox (ideas from Logan's voice chats; read first, act on open items,
-  tick them off): https://claude.ai/artifact/VcaRgz43vtd9hahbt67hwJ
