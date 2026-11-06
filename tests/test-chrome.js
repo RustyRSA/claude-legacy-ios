@@ -46,7 +46,15 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
 
   const C = p.w.__appChrome;
   assert.strictEqual(C.run("model"), "ok");
+  // Sidebar: claude.ai's own interface comes back and the app's controls step aside.
   assert.strictEqual(C.run("sidebar"), "ok");
+  await new Promise((r) => setTimeout(r, 200));
+  assert.ok(!doc.querySelector("[data-app-hidden]"), "nothing hidden while the sidebar is open");
+  assert.strictEqual(p.posted[p.posted.length - 1].sidebarOpen, true, "app told to step aside");
+  p.w.history.pushState({}, "", "/chat/abc"); // a chat picked from the sidebar
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.strictEqual(p.posted[p.posted.length - 1].sidebarOpen, false, "back after a chat is picked");
+  assert.ok(/sidebar closed \(chat picked\)/.test(p.w.__appDebugLog()));
   assert.strictEqual(C.run("plus"), "ok");
   assert.strictEqual(C.run("newChat"), "ok");
   assert.strictEqual(C.run("stop"), "missing stop button");

@@ -1183,23 +1183,49 @@
     }
     return best;
   }
+  // The nearest element holding all of them (none if that is the whole page).
+  function holding(list) {
+    list = list.filter(Boolean);
+    var box = list[0];
+    while (box && !list.every(function (el) { return box.contains(el); })) box = box.parentElement;
+    return box && box !== document.body && box !== document.documentElement ? box : null;
+  }
+  // Buttons in the top bar's right half (title menu, share, "More options").
+  function topRightButtons() {
+    var out = [];
+    var buttons = document.querySelectorAll("button");
+    for (var i = 0; i < buttons.length; i++) {
+      var box = buttons[i].getBoundingClientRect();
+      if (box.width > 0 && box.top < 60 && box.left > window.innerWidth / 2) out.push(buttons[i]);
+    }
+    return out;
+  }
   function chromeControls() {
     var c = {};
     c.editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]');
     c.send = find('button[aria-label="Send message"]');
     c.sidebarButton = find('button[aria-label="Show sidebar"]');
     if (c.editor && c.send) {
-      var box = c.editor;
-      while (box && !box.contains(c.send)) box = box.parentElement;
-      if (box && box !== document.body) {
-        c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
-      }
+      // The whole card: the text, + and model buttons, mic, send.
+      var box = holding([c.editor, c.send, find('button[aria-label^="Model:"]'),
+        find('button[aria-label="Add files, connectors, and more"]')]) || holding([c.editor, c.send]);
+      if (box) c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
     }
-    if (c.sidebarButton) {
-      var top = c.sidebarButton.getBoundingClientRect().top;
-      if (top < 80) c.header = wholeControl(c.sidebarButton, 80);
+    if (c.sidebarButton && c.sidebarButton.getBoundingClientRect().top < 80) {
+      // The whole top bar: left button, chat title and the buttons on the right.
+      var bar = holding([c.sidebarButton].concat(topRightButtons()));
+      if (bar && bar.getBoundingClientRect().height > 120) bar = null; // grew past the bar
+      c.header = wholeControl(bar || c.sidebarButton, 80);
     }
     return c;
+  }
+  function describeElement(el) {
+    if (!el) return "none";
+    var box = el.getBoundingClientRect();
+    var cls = String(el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className || "")
+      .split(/\s+/).slice(0, 3).join(".");
+    return el.tagName.toLowerCase() + (cls ? "." + cls : "") + " " + Math.round(box.width) + "x" + Math.round(box.height) +
+      " at " + Math.round(box.left) + "," + Math.round(box.top);
   }
   // The sidebar counts as open when its "Artifacts" link is what a tap there would hit.
   function sidebarOpen() {
@@ -1233,6 +1259,45 @@
     document.documentElement.classList.toggle("app-native-chrome", list.length > 0);
   }
 
+  // While claude.ai's sidebar is open, its own interface is shown untouched and
+  // the app's controls step aside. Open: the sidebar's links are what a tap hits,
+  // or the sidebar button says it is expanded, or a close button is there. Ends
+  // when it was seen open and is closed again, when a chat is picked (the address
+  // changes), or after 30 s.
+  var sidebarMode = null;
+  function sidebarShowing() {
+    var button = find('button[aria-label="Show sidebar"]');
+    return sidebarOpen() || !!find('button[aria-label="Close sidebar"], button[aria-label="Hide sidebar"]') ||
+      !!(button && button.getAttribute("aria-expanded") === "true");
+  }
+  function inSidebarMode() {
+    if (!sidebarMode) return false;
+    var open = sidebarShowing();
+    if (open) sidebarMode.seenOpen = true;
+    if ((sidebarMode.seenOpen && !open) || location.pathname !== sidebarMode.path ||
+        performance.now() - sidebarMode.since > 30000) {
+      record("chrome", "sidebar closed (" + (location.pathname !== sidebarMode.path ? "chat picked" :
+        sidebarMode.seenOpen ? "seen closing" : "30 s passed, never seen open") + ")");
+      sidebarMode = null;
+      return false;
+    }
+    return true;
+  }
+  function openSidebar(c) {
+    sidebarMode = { since: performance.now(), path: location.pathname, seenOpen: false };
+    setHidden([]);
+    var result = press(c.sidebarButton, "sidebar button");
+    nativeSetTimeout(function () {
+      var hit = document.elementFromPoint(100, Math.round(window.innerHeight / 2));
+      var button = find('button[aria-label="Show sidebar"]');
+      record("chrome", "sidebar after 700 ms: open " + sidebarShowing() + ", links hit " + sidebarOpen() +
+        ", expanded " + (button ? button.getAttribute("aria-expanded") : "no button") +
+        ", at the middle " + describeElement(hit));
+    }, 700);
+    return result;
+  }
+
+  var lastHiddenNote = "";
   function updateChrome() {
     var c = chromeControls();
     var kind = pageKind();
@@ -1242,7 +1307,15 @@
     if (!c.composer) missing.push("message box card");
     if (!c.header) missing.push("header");
     var ready = kind !== "other" && missing.length === 0;
-    setHidden(ready ? [c.header, c.composer] : []);
+    var sidebar = ready && inSidebarMode();
+    setHidden(ready && !sidebar ? [c.header, c.composer] : []);
+    if (ready && !sidebar) {
+      var note = kind + ": header " + describeElement(c.header) + "; message box " + describeElement(c.composer);
+      if (note !== lastHiddenNote) {
+        lastHiddenNote = note;
+        record("chrome", "hidden " + note);
+      }
+    }
     var model = find('button[aria-label^="Model:"]');
     var modelName = model ? model.getAttribute("aria-label").replace(/^Model:\s*/, "") : "";
     var words = modelName.split(" ");
@@ -1251,7 +1324,7 @@
       ready: ready,
       why: kind === "other" ? "page " + location.pathname.split("/")[1] : missing.length ? "missing " + missing.join(", ") : "",
       page: kind,
-      sidebarOpen: ready && sidebarOpen(),
+      sidebarOpen: sidebar,
       streaming: !!(c.composer && stopButton(c.composer)),
       model: words.join(" "),
       effort: effort,
@@ -1322,7 +1395,7 @@
       var c = chromeControls();
       var result;
       switch (name) {
-        case "sidebar": result = press(c.sidebarButton, "sidebar button"); break;
+        case "sidebar": result = openSidebar(c); break;
         case "incognito": result = press(find('button[aria-label="Use incognito"]'), "incognito button"); break;
         case "newChat":
           var link = find('a[href="/new"]');

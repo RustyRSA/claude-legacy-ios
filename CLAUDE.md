@@ -149,6 +149,13 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   inputmode none, select all, execCommand insertText, press Send. Anything missing ->
   nothing hidden, native hidden, reason in the debug log (`native controls:` line).
 - Advanced menu: "Native controls" switch (setting `NativeControls`, default on).
+- 12b (screenshots 6 Nov): works on new chat; in a chat only the left part of claude.ai's
+  header was hidden (title and right buttons showed) and the model pill peeked below the card;
+  sidebar broken. Now: header = element holding the sidebar button and the top-right buttons,
+  message box = element holding editor, send, model and + buttons; sidebar mode (claude.ai UI
+  restored, native hidden until closed / chat picked / 30 s) with a diagnostic log line.
+  Text in native controls showed in small caps on Logan's phone: the system font seems
+  changed by a tweak (status bar too); controls use UIFont systemFont.
 - Not yet native: the + / model / chat menus (claude.ai's web menus open), sidebar, messages.
 
 ### Round 11 (5 Nov 2026) — launch freezes
