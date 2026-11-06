@@ -380,6 +380,35 @@ analytics of its own (claude.ai itself runs Datadog RUM).
   chat list + read-only chat viewer for instant look-ups while claude.ai loads;
   no full redesign of claude.ai's UI.
 
+## Roadmap (6 Nov 2026, agreed with Logan)
+
+Route: rebuild in place, layered. claude.ai's web app stays the engine (runtime
+transpile + polyfills); the app owns the shell, loading, storage, diagnostics, and
+draws native iOS 16 controls (UIKit, SF Symbols, New York serif) that drive
+claude.ai's controls underneath and fall back to claude.ai's own UI when a control is
+not found. Rejected: own client on claude.ai's private API (fragile, account risk),
+decompiling the official app (not decryptable on 16.3, terms and font licences),
+native module loading (needs import maps, iOS 16.4+), liquid glass (iOS 26 only).
+
+Scores (estimates, ISO/IEC 25010, official app = 10): before 30 Oct / now / target.
+Usability 3/4/8 · Performance 2/6/7-8 · Reliability 3/7/8 · Functional completeness
+6/8/8-9 · Compatibility 6/8/8 · Security 5/8/8 · Maintainability 4/6/7.
+
+| Phase | Work | Status |
+|---|---|---|
+| A | Finish native controls stage 1: verify on device, keep the last message clear of the native box, keyboard stays after sending | In progress (12d) |
+| B | Native menus: +, model, chat "..." as UIMenu filled from claude.ai's options | Next |
+| C | Native chat list: slide-in, cached on the phone (instant at launch), search | Planned |
+| D | Message styling: user bubble, serif replies, spacing, reply toolbar, scroll-down button | Planned |
+| E | Polish: haptics, edge swipe for the chat list, long-press menus, sheets for artifacts/files | Planned |
+| F | Reliability: why WebKit drops the sign-in cookie; alarm when claude.ai renames a label we use | Planned |
+
+Maybe: launch snapshot; background transpile of likely-needed modules; artifact/doc
+frames compatibility; read-only offline chat viewer; local notification when a reply
+finishes in the background; split ViewController.m / app-tweaks.js.
+Not possible / not doing: Anthropic push notifications, liquid glass, official fonts
+and icons, the official app's widgets/Siri/Shortcuts.
+
 ## Open items
 
 | Item | Status |
