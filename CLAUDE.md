@@ -156,6 +156,13 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   restored, native hidden until closed / chat picked / 30 s) with a diagnostic log line.
   Text in native controls showed in small caps on Logan's phone: the system font seems
   changed by a tweak (status bar too); controls use UIFont systemFont.
+- 12c (log 6 Nov 13:24): the "header" hidden was `aside.dframe-sidebar` (32x32): claude.ai's
+  "Show sidebar" button lives in the collapsed sidebar panel, so the panel was made invisible
+  (sidebar broken) and the real top bar stayed. Now: top bar = element holding the buttons at
+  the top outside `aside` (title, More options, LoganPC, Activity, share; incognito on new
+  chat); the sidebar button alone is hidden, never the panel. Found controls kept per address
+  (taps had slowed to a 228 ms median with the page searched after every change).
+  Small caps in native text was the A-Font tweak (now disabled for the app).
 - Not yet native: the + / model / chat menus (claude.ai's web menus open), sidebar, messages.
 
 ### Round 11 (5 Nov 2026) — launch freezes

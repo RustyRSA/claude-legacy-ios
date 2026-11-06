@@ -18,11 +18,21 @@ function page(html, url) {
   w.__appSettings = { nativeChrome: 1 }; // as the app's JSON may send it
   w.document.addEventListener("click", (e) => clicks.push(e.target.getAttribute("aria-label") || e.target.getAttribute("href")), true);
   w.document.execCommand = (cmd, ui, text) => { w.__typed = text; return true; };
+  // jsdom has no layout: elements with data-rect="x,y,w,h" get that box.
+  const plainRect = w.Element.prototype.getBoundingClientRect;
+  w.Element.prototype.getBoundingClientRect = function () {
+    const r = this.getAttribute && this.getAttribute("data-rect");
+    if (!r) return plainRect.call(this);
+    const [x, y, wd, h] = r.split(",").map(Number);
+    return { left: x, top: y, width: wd, height: h, right: x + wd, bottom: y + h };
+  };
   w.eval(src);
   return { w, posted, clicks };
 }
 
-const HEADER = '<header><button aria-label="Show sidebar">≡</button><button aria-label="Use incognito">g</button></header>';
+// As on claude.ai: "Show sidebar" lives in the collapsed sidebar panel, the top bar holds the rest.
+const HEADER = '<aside class="dframe-sidebar"><button aria-label="Show sidebar" data-rect="10,8,32,32">≡</button></aside>' +
+  '<header><button aria-label="Use incognito" data-rect="300,8,32,32">g</button></header>';
 const COMPOSER = '<fieldset><div contenteditable="true" aria-label="Write your prompt to Claude"></div>' +
   '<button aria-label="Add files, connectors, and more">+</button><button aria-label="Model: Opus 5.5 Extra">Opus</button>' +
   '<button aria-label="Dictate">m</button><button aria-label="Send message">↑</button><button aria-label="Use voice mode">v</button></fieldset>';
@@ -41,7 +51,9 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(state.incognito, true);
   const doc = p.w.document;
   assert.ok(doc.documentElement.classList.contains("app-native-chrome"));
-  assert.ok(doc.querySelector("header").hasAttribute("data-app-hidden") || doc.querySelector('[aria-label="Show sidebar"]').closest("[data-app-hidden]"), "header hidden");
+  assert.ok(doc.querySelector('[aria-label="Use incognito"]').closest("[data-app-hidden]"), "top bar hidden");
+  assert.ok(doc.querySelector('[aria-label="Show sidebar"]').hasAttribute("data-app-hidden"), "sidebar button hidden");
+  assert.ok(!doc.querySelector("aside").hasAttribute("data-app-hidden"), "sidebar panel untouched");
   assert.ok(doc.querySelector('[aria-label="Send message"]').closest("[data-app-hidden]"), "message box hidden");
 
   const C = p.w.__appChrome;

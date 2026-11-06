@@ -1190,33 +1190,43 @@
     while (box && !list.every(function (el) { return box.contains(el); })) box = box.parentElement;
     return box && box !== document.body && box !== document.documentElement ? box : null;
   }
-  // Buttons in the top bar's right half (title menu, share, "More options").
-  function topRightButtons() {
+  // The top bar's buttons (chat title, "More options", share; incognito on a new
+  // chat). Not the sidebar's: claude.ai's "Show sidebar" button sits inside the
+  // collapsed sidebar panel (aside.dframe-sidebar), which must stay untouched.
+  function topBarButtons() {
     var out = [];
     var buttons = document.querySelectorAll("button");
     for (var i = 0; i < buttons.length; i++) {
+      if (buttons[i].closest("aside")) continue;
       var box = buttons[i].getBoundingClientRect();
-      if (box.width > 0 && box.top < 60 && box.left > window.innerWidth / 2) out.push(buttons[i]);
+      if (box.width > 0 && box.top < 60 && box.left > 40) out.push(buttons[i]);
     }
     return out;
   }
+  // Found controls are kept until the address changes or one leaves the page,
+  // so the page is not searched again after every change.
+  var found = null;
   function chromeControls() {
     var c = {};
     c.editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]');
     c.send = find('button[aria-label="Send message"]');
     c.sidebarButton = find('button[aria-label="Show sidebar"]');
+    if (found && found.path === location.pathname && found.editor === c.editor &&
+        found.composer && found.composer.isConnected && found.composer.contains(c.send) &&
+        found.header && found.header.isConnected) {
+      c.composer = found.composer;
+      c.header = found.header;
+      return c;
+    }
     if (c.editor && c.send) {
       // The whole card: the text, + and model buttons, mic, send.
       var box = holding([c.editor, c.send, find('button[aria-label^="Model:"]'),
         find('button[aria-label="Add files, connectors, and more"]')]) || holding([c.editor, c.send]);
       if (box) c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
     }
-    if (c.sidebarButton && c.sidebarButton.getBoundingClientRect().top < 80) {
-      // The whole top bar: left button, chat title and the buttons on the right.
-      var bar = holding([c.sidebarButton].concat(topRightButtons()));
-      if (bar && bar.getBoundingClientRect().height > 120) bar = null; // grew past the bar
-      c.header = wholeControl(bar || c.sidebarButton, 80);
-    }
+    var bar = holding(topBarButtons());
+    if (bar && bar.getBoundingClientRect().height <= 120) c.header = wholeControl(bar, 80);
+    found = { path: location.pathname, editor: c.editor, composer: c.composer, header: c.header };
     return c;
   }
   function describeElement(el) {
@@ -1308,9 +1318,10 @@
     if (!c.header) missing.push("header");
     var ready = kind !== "other" && missing.length === 0;
     var sidebar = ready && inSidebarMode();
-    setHidden(ready && !sidebar ? [c.header, c.composer] : []);
+    // The sidebar button alone, never its panel: the native menu button covers it.
+    setHidden(ready && !sidebar ? [c.header, c.composer, c.sidebarButton].filter(Boolean) : []);
     if (ready && !sidebar) {
-      var note = kind + ": header " + describeElement(c.header) + "; message box " + describeElement(c.composer);
+      var note = kind + ": top bar " + describeElement(c.header) + "; message box " + describeElement(c.composer);
       if (note !== lastHiddenNote) {
         lastHiddenNote = note;
         record("chrome", "hidden " + note);
