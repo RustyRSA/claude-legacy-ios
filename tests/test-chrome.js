@@ -89,6 +89,24 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.ok(!q.w.document.querySelector("[data-app-hidden]"), "nothing hidden");
   assert.ok(/native controls: on, not in use \(missing/.test(q.w.__appDebugLog()), "reason in the debug log");
 
+  // A chat: the top bar's buttons sit in two separate parts of the layout (title
+  // group and share). Both are hidden, each on its own; the sidebar panel stays.
+  const CHAT_TOP = '<aside class="dframe-sidebar"><button aria-label="Show sidebar" data-rect="10,8,32,32">≡</button></aside>' +
+    '<div data-rect="0,0,357,800"><div data-rect="46,8,180,32" id="titlegroup"><button aria-label="Chat, rename session" data-rect="46,10,24,32">t</button>' +
+    '<button aria-label="More options for Chat" data-rect="60,10,32,32">…</button></div>' +
+    '<main data-rect="0,0,357,800"><div data-rect="267,8,82,32" id="sharegroup"><button aria-label="wiggle-controls-actions-share" data-rect="267,10,82,32">s</button></div></main></div>';
+  const chat = page(CHAT_TOP + COMPOSER, "https://claude.ai/chat/abc");
+  await new Promise((res) => setTimeout(res, 50));
+  const s3 = chat.posted[chat.posted.length - 1];
+  assert.strictEqual(s3.ready, true, "chat ready: " + JSON.stringify(s3));
+  assert.strictEqual(s3.more, true, "chat menu found");
+  const cd = chat.w.document;
+  assert.ok(cd.getElementById("titlegroup").hasAttribute("data-app-hidden"), "title group hidden");
+  assert.ok(cd.getElementById("sharegroup").hasAttribute("data-app-hidden"), "share group hidden");
+  assert.ok(!cd.querySelector("aside").hasAttribute("data-app-hidden"), "sidebar panel untouched");
+  assert.strictEqual(chat.w.__appChrome.run("more"), "ok");
+  assert.strictEqual(chat.clicks[chat.clicks.length - 1], "More options for Chat");
+
   // Pages other than new chat and chats keep claude.ai's own controls.
   const r = page(HEADER + COMPOSER, "https://claude.ai/projects");
   await new Promise((res) => setTimeout(res, 50));

@@ -163,6 +163,10 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   chat); the sidebar button alone is hidden, never the panel. Found controls kept per address
   (taps had slowed to a 228 ms median with the page searched after every change).
   Small caps in native text was the A-Font tweak (now disabled for the app).
+- 12d (log 6 Nov 13:39): in a chat "missing header" (top bar buttons sit in different parts
+  of the layout, no small common box), so claude.ai's own controls showed. Now each top-bar
+  group is hidden on its own (never past an element holding the sidebar `aside`), the top bar
+  is not required, and hidden marks are only touched when they change.
 - Not yet native: the + / model / chat menus (claude.ai's web menus open), sidebar, messages.
 
 ### Round 11 (5 Nov 2026) — launch freezes

@@ -1172,12 +1172,13 @@
   }
   // The outermost ancestor that is still the same control (no taller than
   // maxHeight), so its card or bar is hidden too, not only what is inside.
+  // Never past an element holding the sidebar panel (aside), which must stay.
   function wholeControl(el, maxHeight) {
     var best = el;
     var parent = el && el.parentElement;
     while (parent && parent !== document.body && parent !== document.documentElement) {
       var box = parent.getBoundingClientRect();
-      if (box.height > maxHeight || box.height === 0) break;
+      if (box.height > maxHeight || box.height === 0 || parent.querySelector("aside")) break;
       best = parent;
       parent = parent.parentElement;
     }
@@ -1206,27 +1207,39 @@
   // Found controls are kept until the address changes or one leaves the page,
   // so the page is not searched again after every change.
   var found = null;
+  function stillThere(list) {
+    return list.every(function (el) { return el.isConnected; });
+  }
   function chromeControls() {
     var c = {};
     c.editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]');
     c.send = find('button[aria-label="Send message"]');
     c.sidebarButton = find('button[aria-label="Show sidebar"]');
-    if (found && found.path === location.pathname && found.editor === c.editor &&
-        found.composer && found.composer.isConnected && found.composer.contains(c.send) &&
-        found.header && found.header.isConnected) {
+    if (found && found.path === location.pathname && found.editor === c.editor && found.composer &&
+        found.composer.isConnected && found.composer.contains(c.send) && stillThere(found.topBar)) {
       c.composer = found.composer;
-      c.header = found.header;
-      return c;
+      c.topBar = found.topBar;
+    } else {
+      if (c.editor && c.send) {
+        // The whole card: the text, + and model buttons, mic, send.
+        var box = holding([c.editor, c.send, find('button[aria-label^="Model:"]'),
+          find('button[aria-label="Add files, connectors, and more"]')]) || holding([c.editor, c.send]);
+        if (box) c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
+      }
+      // The top bar's groups (in a chat they sit in different parts of the
+      // layout), each hidden on its own; one inside another counts once.
+      var groups = [];
+      topBarButtons().forEach(function (button) {
+        var group = wholeControl(button, 80);
+        if (groups.some(function (g) { return g.contains(group); })) return;
+        groups = groups.filter(function (g) { return !group.contains(g); });
+        groups.push(group);
+      });
+      c.topBar = groups;
+      found = { path: location.pathname, editor: c.editor, composer: c.composer, topBar: groups };
     }
-    if (c.editor && c.send) {
-      // The whole card: the text, + and model buttons, mic, send.
-      var box = holding([c.editor, c.send, find('button[aria-label^="Model:"]'),
-        find('button[aria-label="Add files, connectors, and more"]')]) || holding([c.editor, c.send]);
-      if (box) c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
-    }
-    var bar = holding(topBarButtons());
-    if (bar && bar.getBoundingClientRect().height <= 120) c.header = wholeControl(bar, 80);
-    found = { path: location.pathname, editor: c.editor, composer: c.composer, header: c.header };
+    c.more = null;
+    c.topBar.some(function (g) { return (c.more = find('button[aria-label^="More options"]', g)); });
     return c;
   }
   function describeElement(el) {
@@ -1260,13 +1273,19 @@
   }
 
   var hiddenNow = [];
+  // Only what changed is touched: re-setting the marks restyles the page.
   function setHidden(list) {
     hiddenNow.forEach(function (el) {
       if (list.indexOf(el) === -1) el.removeAttribute("data-app-hidden");
     });
-    list.forEach(function (el) { el.setAttribute("data-app-hidden", ""); });
+    list.forEach(function (el) {
+      if (!el.hasAttribute("data-app-hidden")) el.setAttribute("data-app-hidden", "");
+    });
     hiddenNow = list;
-    document.documentElement.classList.toggle("app-native-chrome", list.length > 0);
+    var root = document.documentElement;
+    if (root.classList.contains("app-native-chrome") !== list.length > 0) {
+      root.classList.toggle("app-native-chrome", list.length > 0);
+    }
   }
 
   // While claude.ai's sidebar is open, its own interface is shown untouched and
@@ -1315,13 +1334,13 @@
     if (!c.editor) missing.push("message box");
     if (!c.send) missing.push("send button");
     if (!c.composer) missing.push("message box card");
-    if (!c.header) missing.push("header");
     var ready = kind !== "other" && missing.length === 0;
     var sidebar = ready && inSidebarMode();
     // The sidebar button alone, never its panel: the native menu button covers it.
-    setHidden(ready && !sidebar ? [c.header, c.composer, c.sidebarButton].filter(Boolean) : []);
+    setHidden(ready && !sidebar ? c.topBar.concat([c.composer, c.sidebarButton]).filter(Boolean) : []);
     if (ready && !sidebar) {
-      var note = kind + ": top bar " + describeElement(c.header) + "; message box " + describeElement(c.composer);
+      var note = kind + ": top bar " + (c.topBar.length ? c.topBar.map(describeElement).join(" + ") : "none") +
+        "; message box " + describeElement(c.composer);
       if (note !== lastHiddenNote) {
         lastHiddenNote = note;
         record("chrome", "hidden " + note);
@@ -1342,7 +1361,7 @@
       voice: !!find('button[aria-label="Use voice mode"]'),
       dictate: !!find('button[aria-label="Dictate"]'),
       incognito: !!find('button[aria-label="Use incognito"]'),
-      more: !!(c.header && find('button[aria-label^="More options"]', c.header))
+      more: !!c.more
     };
     var key = JSON.stringify(chromeState);
     if (key === chromeSent) return;
@@ -1414,7 +1433,7 @@
           else location.assign("/new");
           result = "ok";
           break;
-        case "more": result = press(c.header && find('button[aria-label^="More options"]', c.header), "chat menu"); break;
+        case "more": result = press(c.more, "chat menu"); break;
         case "plus": result = press(find('button[aria-label="Add files, connectors, and more"]'), "+ button"); break;
         case "model": result = press(find('button[aria-label^="Model:"]'), "model button"); break;
         case "dictate": result = press(find('button[aria-label="Dictate"]'), "dictate button"); break;
