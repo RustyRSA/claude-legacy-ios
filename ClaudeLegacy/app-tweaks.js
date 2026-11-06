@@ -1376,33 +1376,62 @@
     el.click();
     return "ok";
   }
-  // Puts the text into claude.ai's message box and presses its send button. The
-  // box is focused with inputmode "none" so the page's own keyboard stays away.
+  // Hands the text to claude.ai's (empty) message box as a paste, without focusing
+  // it, so the app's keyboard stays up. Only short text: claude.ai turns long
+  // pastes into an attached file. False when the paste did not land.
+  var PASTE_LIMIT = 2000;
+  function pasteInto(editor, text) {
+    if (text.length > PASTE_LIMIT || editor.textContent.replace(/\s/g, "")) return false;
+    if (typeof DataTransfer !== "function" || typeof ClipboardEvent !== "function") return false;
+    try {
+      var data = new DataTransfer();
+      data.setData("text/plain", text);
+      var event = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true });
+      // Without readable clipboard data the editor would take focus to capture it.
+      if (!event.clipboardData || event.clipboardData.getData("text/plain") !== text) return false;
+      editor.dispatchEvent(event);
+    } catch (e) {
+      return false;
+    }
+    return editor.textContent.replace(/\s/g, "").length > 0;
+  }
+  // Types the text into claude.ai's box: focused with inputmode "none" so the
+  // page's own keyboard stays away (the app's keyboard drops for a moment).
+  function typeInto(editor, text) {
+    editor.focus();
+    var range = document.createRange();
+    range.selectNodeContents(editor);
+    var selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.execCommand("insertText", false, text);
+  }
+  // Puts the text into claude.ai's message box and presses its send button.
   function sendText(text) {
     var c = chromeControls();
     if (!c.editor || !c.send) return Promise.resolve("message box not found");
     if (!text.replace(/\s/g, "")) return Promise.resolve("nothing to send");
     var editor = c.editor;
     var mode = editor.getAttribute("inputmode");
-    editor.setAttribute("inputmode", "none");
-    try {
-      editor.focus();
-      var range = document.createRange();
-      range.selectNodeContents(editor);
-      var selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-      document.execCommand("insertText", false, text);
-    } catch (e) {
-      return Promise.resolve("typing failed: " + describe(e));
+    var how = "pasted";
+    if (!pasteInto(editor, text)) {
+      how = "typed";
+      editor.setAttribute("inputmode", "none");
+      try {
+        typeInto(editor, text);
+      } catch (e) {
+        return Promise.resolve("typing failed: " + describe(e));
+      }
     }
     return new Promise(function (resolve) {
       var tries = 0;
       var finish = function (result) {
-        try { editor.blur(); } catch (e) {}
-        if (mode === null) editor.removeAttribute("inputmode");
-        else editor.setAttribute("inputmode", mode);
-        record("chrome", "send: " + result);
+        if (how === "typed") {
+          try { editor.blur(); } catch (e) {}
+          if (mode === null) editor.removeAttribute("inputmode");
+          else editor.setAttribute("inputmode", mode);
+        }
+        record("chrome", "send (" + how + "): " + result);
         resolve(result);
       };
       var attempt = function () {
@@ -1418,6 +1447,37 @@
       };
       attempt();
     });
+  }
+
+  // The app's keyboard covers the bottom of the page (the page itself does not
+  // shrink for it), so claude.ai's message list gets that much room at its end,
+  // and stays scrolled to the end when it was there. arg: "points,viewWidthPoints".
+  var keyboardScroller = null;
+  function messageScroller() {
+    var start = find('button[aria-label="Copy"]') || chromeControls().composer;
+    for (var el = start; el && el !== document.body; el = el.parentElement) {
+      var overflow = getComputedStyle(el).overflowY;
+      if ((overflow === "auto" || overflow === "scroll") && el.scrollHeight > el.clientHeight) return el;
+    }
+    return document.scrollingElement;
+  }
+  function setKeyboardRoom(arg) {
+    var parts = String(arg).split(",");
+    var points = Number(parts[0]) || 0;
+    var width = Number(parts[1]) || window.innerWidth;
+    var px = Math.round(points * window.innerWidth / width);
+    if (keyboardScroller && (!px || !keyboardScroller.isConnected)) {
+      keyboardScroller.style.removeProperty("padding-bottom");
+      keyboardScroller = null;
+    }
+    if (!px) return "ok";
+    var scroller = messageScroller();
+    if (!scroller) return "no message list";
+    var atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
+    scroller.style.setProperty("padding-bottom", px + "px", "important");
+    keyboardScroller = scroller;
+    if (atEnd) scroller.scrollTop = scroller.scrollHeight;
+    return "ok";
   }
 
   window.__appChrome = {
@@ -1440,6 +1500,7 @@
         case "voice": result = press(find('button[aria-label="Use voice mode"]'), "voice button"); break;
         case "stop": result = press(c.composer && stopButton(c.composer), "stop button"); break;
         case "send": return sendText(String(arg || ""));
+        case "keyboard": return setKeyboardRoom(arg);
         default: result = "unknown action " + name;
       }
       if (result !== "ok") record("chrome", name + ": " + result);

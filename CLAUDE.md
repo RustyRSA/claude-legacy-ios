@@ -167,6 +167,11 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   of the layout, no small common box), so claude.ai's own controls showed. Now each top-bar
   group is hidden on its own (never past an element holding the sidebar `aside`), the top bar
   is not required, and hidden marks are only touched when they change.
+- 12e (Phase A): send pastes the text into claude.ai's empty box (ClipboardEvent + DataTransfer,
+  no focus, so the app's keyboard stays); typed fallback for text over 2000 characters, a
+  non-empty box or no clipboard support (log: `send (pasted|typed)`). Keyboard room: on
+  UIKeyboardWillChangeFrame while the native box is editing, the page gets padding at the end
+  of its message list (`keyboard` action, points converted to CSS px) and stays at the end.
 - Not yet native: the + / model / chat menus (claude.ai's web menus open), sidebar, messages.
 
 ### Round 11 (5 Nov 2026) — launch freezes
@@ -396,7 +401,7 @@ Usability 3/4/8 · Performance 2/6/7-8 · Reliability 3/7/8 · Functional comple
 
 | Phase | Work | Status |
 |---|---|---|
-| A | Finish native controls stage 1: verify on device, keep the last message clear of the native box, keyboard stays after sending | In progress (12d) |
+| A | Finish native controls stage 1: verify on device, keep the last message clear of the native box, keyboard stays after sending | In progress (12e: paste send + keyboard room built, awaiting device check) |
 | B | Native menus: +, model, chat "..." as UIMenu filled from claude.ai's options | Next |
 | C | Native chat list: slide-in, cached on the phone (instant at launch), search | Planned |
 | D | Message styling: user bubble, serif replies, spacing, reply toolbar, scroll-down button | Planned |

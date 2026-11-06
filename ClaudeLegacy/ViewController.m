@@ -339,6 +339,8 @@ API_AVAILABLE(ios(15.0))
 - (void)applyState:(NSDictionary *)state;
 /// After a send: clears the box when it worked and gives the keyboard back.
 - (void)finishSend:(BOOL)sent;
+/// The app's message box has the keyboard.
+@property (nonatomic, readonly) BOOL editing;
 @end
 
 @implementation NativeChrome {
@@ -622,6 +624,10 @@ API_AVAILABLE(ios(15.0))
     }];
 }
 
+- (BOOL)editing {
+    return _textView.isFirstResponder;
+}
+
 - (void)finishSend:(BOOL)sent {
     if (sent) {
         _textView.text = @"";
@@ -834,6 +840,11 @@ API_AVAILABLE(ios(15.0))
                                              selector:@selector(audioRouteChanged:)
                                                  name:AVAudioSessionRouteChangeNotification
                                                object:nil];
+    // The page gets room at the end of its message list for the app's keyboard.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(keyboardWillChangeFrame:)
+                                                 name:UIKeyboardWillChangeFrameNotification
+                                               object:nil];
 
     // Going to the background and back: logged, cookies saved, and a page that
     // iOS stopped in the meantime is reloaded.
@@ -950,6 +961,22 @@ API_AVAILABLE(ios(15.0))
                 [[strongSelf topPresenter] presentViewController:alert animated:YES completion:nil];
             }
         }];
+    }
+}
+
+/// The page does not shrink for the app's keyboard, so it is told how much of it
+/// the keyboard covers (points, with the page's width in points to convert).
+- (void)keyboardWillChangeFrame:(NSNotification *)note {
+    if (@available(iOS 15.0, *)) {
+        NativeChrome *chrome = (NativeChrome *)self.nativeChrome;
+        if (chrome == nil || chrome.hidden) {
+            return;
+        }
+        CGRect keyboard = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+        CGRect page = [self.webView convertRect:self.webView.bounds toView:nil];
+        CGFloat covered = chrome.editing ? MAX(0, CGRectGetMaxY(page) - CGRectGetMinY(keyboard)) : 0;
+        NSString *argument = [NSString stringWithFormat:@"%.0f,%.0f", covered, CGRectGetWidth(page)];
+        [self runChromeAction:@"keyboard" argument:argument];
     }
 }
 

@@ -80,6 +80,30 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.ok(!editor.hasAttribute("inputmode"), "inputmode restored");
   assert.strictEqual(await C.run("send", "   "), "nothing to send");
 
+  // Keyboard room: accepted, and removed again with 0.
+  assert.ok(["ok", "no message list"].includes(C.run("keyboard", "300,393")));
+  assert.strictEqual(C.run("keyboard", "0,393"), "ok");
+
+  // Where the page can take a paste: the text arrives without focusing claude.ai's
+  // box (the app's keyboard stays up).
+  const pp = page(HEADER + SIDEBAR + COMPOSER);
+  pp.w.DataTransfer = class { constructor() { this.d = {}; } setData(t, v) { this.d[t] = v; } getData(t) { return this.d[t]; } };
+  pp.w.ClipboardEvent = class extends pp.w.Event { constructor(type, init) { super(type, init); this.clipboardData = init.clipboardData; } };
+  const ppEditor = pp.w.document.querySelector('[contenteditable="true"]');
+  ppEditor.addEventListener("paste", (e) => { ppEditor.textContent = e.clipboardData.getData("text/plain"); });
+  let focused = false;
+  ppEditor.addEventListener("focus", () => { focused = true; });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.strictEqual(await pp.w.__appChrome.run("send", "Pasted hello"), "ok");
+  assert.strictEqual(ppEditor.textContent, "Pasted hello");
+  assert.strictEqual(pp.w.__typed, undefined, "not typed");
+  assert.ok(!focused, "claude.ai's box never focused");
+  assert.ok(/send \(pasted\): ok/.test(pp.w.__appDebugLog()));
+  // Long text is typed instead (claude.ai makes long pastes into a file).
+  ppEditor.textContent = "";
+  assert.strictEqual(await pp.w.__appChrome.run("send", "x".repeat(2500)), "ok");
+  assert.strictEqual(pp.w.__typed.length, 2500);
+
   // A missing control: nothing hidden, the app keeps claude.ai's own controls.
   const q = page(HEADER + '<div contenteditable="true" aria-label="Write your prompt to Claude"></div>');
   await new Promise((r) => setTimeout(r, 50));
