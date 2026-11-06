@@ -8,14 +8,17 @@ on:
   workflow_dispatch:
     inputs:
       runner:
-        # macos-14 when GitHub has no macos-15 machine free (the job then fails
-        # with "not acquired by Runner"). Both carry Xcode 16, selected below.
+        # Another type when GitHub has no macos-15 machine free (the job then fails
+        # with "not acquired by Runner"). macos-15-intel carries the same Xcode 16;
+        # macos-26 may only have a newer Xcode (the minimum-iOS check below still
+        # applies). macos-14 was retired by GitHub on 6 Nov 2026.
         description: macOS machine type
         type: choice
         default: macos-15
         options:
           - macos-15
-          - macos-14
+          - macos-15-intel
+          - macos-26
 
 permissions:
   contents: read
