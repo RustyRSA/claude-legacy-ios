@@ -24,13 +24,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-/// "Chats": search, New chat, the chats, and a row that opens claude.ai's own
-/// menu for everything else (projects, settings).
+/// "Chats": search, New chat, the chats, a row that opens claude.ai's own menu
+/// for everything else (projects, settings), and a row for the app's menu.
 @interface ChatListViewController : UITableViewController <UISearchResultsUpdating>
 
 @property (nonatomic, copy, nullable) void (^onOpenChat)(NSString *chatID);
 @property (nonatomic, copy, nullable) void (^onNewChat)(void);
 @property (nonatomic, copy, nullable) void (^onShowClaudeMenu)(void);
+/// The app's own menu (reload, page size, advanced, debug log).
+@property (nonatomic, copy, nullable) void (^onShowAppMenu)(void);
 
 @end
 

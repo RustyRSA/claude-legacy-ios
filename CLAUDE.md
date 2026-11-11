@@ -185,6 +185,9 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   when the store has chats, also while the page loads. Picking a chat: page ready ->
   `openChat` clicks claude.ai's own link (else `location.assign`); not ready -> the
   address is loaded. Limit: only chats claude.ai has listed on this phone.
+- 13d: "App settings" row in the native chat list opens the app menu (`-showAppMenu`, also
+  still on the three-finger long press); light haptic on send.
+- 13b, 13c, 13d built (`75ef417`, `6e61161`, next commit), none checked on device yet.
 - Next: native menus (+, model, "..."), check 13b/13c on device.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1

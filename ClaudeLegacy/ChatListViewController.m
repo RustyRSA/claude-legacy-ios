@@ -244,7 +244,10 @@ typedef NS_ENUM(NSInteger, ChatListSection) {
     if (section == ChatListSectionChats) {
         return (NSInteger)_shown.count;
     }
-    return _searching ? 0 : 1;
+    if (_searching) {
+        return 0;
+    }
+    return section == ChatListSectionMore ? 2 : 1;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
@@ -275,8 +278,9 @@ typedef NS_ENUM(NSInteger, ChatListSection) {
         cell.textLabel.textColor = self.view.tintColor;
         cell.imageView.image = [UIImage systemImageNamed:@"square.and.pencil"];
     } else if (indexPath.section == ChatListSectionMore) {
-        cell.textLabel.text = @"Claude menu";
-        cell.imageView.image = [UIImage systemImageNamed:@"sidebar.left"];
+        BOOL appRow = indexPath.row == 1;
+        cell.textLabel.text = appRow ? @"App settings" : @"Claude menu";
+        cell.imageView.image = [UIImage systemImageNamed:appRow ? @"gearshape" : @"sidebar.left"];
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else {
         NSDictionary *chat = _shown[(NSUInteger)indexPath.row];
@@ -296,7 +300,7 @@ typedef NS_ENUM(NSInteger, ChatListSection) {
         void (^action)(void) = self.onNewChat;
         [self closeThen:action];
     } else if (indexPath.section == ChatListSectionMore) {
-        void (^action)(void) = self.onShowClaudeMenu;
+        void (^action)(void) = indexPath.row == 1 ? self.onShowAppMenu : self.onShowClaudeMenu;
         [self closeThen:action];
     } else if ((NSUInteger)indexPath.row < _shown.count) {
         NSString *chatID = _shown[(NSUInteger)indexPath.row][@"id"];

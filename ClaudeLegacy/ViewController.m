@@ -758,6 +758,7 @@ API_AVAILABLE(ios(15.0))
             return;
         }
         _refocusAfterSend = _textView.isFirstResponder;
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
         [self fire:@"send" argument:text];
     } else {
         [_textView resignFirstResponder];
@@ -1053,6 +1054,9 @@ API_AVAILABLE(ios(15.0))
     };
     list.onShowClaudeMenu = ^{
         [weakSelf runChromeAction:@"sidebar" argument:nil];
+    };
+    list.onShowAppMenu = ^{
+        [weakSelf showAppMenu];
     };
     UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:list];
     navigation.overrideUserInterfaceStyle = self.nativeChrome.overrideUserInterfaceStyle;
@@ -1402,6 +1406,12 @@ API_AVAILABLE(ios(15.0))
     if (gesture.state != UIGestureRecognizerStateBegan || self.presentedViewController != nil) {
         return;
     }
+    [self showAppMenu];
+}
+
+/// The app's own menu: from the three-finger long press, or "App settings" in
+/// the native chat list.
+- (void)showAppMenu {
 
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
                                                                    message:nil
