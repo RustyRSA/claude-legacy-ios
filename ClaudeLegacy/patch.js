@@ -10,7 +10,16 @@
   const HISTORY_KEY = "__appModuleHistory";
   // Set once the old web caches are gone (transpiled code now lives in the app).
   const MIGRATED_KEY = "__appStoreMigrated";
-  const BOOT_MS = 2500; // the send button shows at about 2.1 s
+  // The next launch reads ahead what this one asked for before its send button
+  // showed (plus 0.5 s), at least BOOT_MS and at most 10 s. A fixed 2.5 s made a
+  // slow launch (after a claude.ai update: send button at 4.6 s) save a short
+  // list, which kept the following launches slow (log 11 Nov: 71 of 963 modules).
+  const BOOT_MS = 2500;
+  const bootCutoff = () => {
+    const marks = window.__appLaunchMarks;
+    const seen = marks && marks.sendButton ? marks.sendButton + 500 : 0;
+    return Math.min(10000, Math.max(BOOT_MS, seen));
+  };
 
   const status = (payload) => {
     try {
@@ -270,7 +279,7 @@
       // The next launch reads ahead only what this one needed in its first
       // seconds; reading every module it ever used (800, 40 MB) at once slowed
       // the start down. The rest is read from the app's store when asked for.
-      if (prune) localStorage.setItem(MANIFEST_KEY, JSON.stringify(LT.usedModules(BOOT_MS).slice(0, 800)));
+      if (prune) localStorage.setItem(MANIFEST_KEY, JSON.stringify(LT.usedModules(bootCutoff()).slice(0, 800)));
       let history = [];
       try {
         history = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");

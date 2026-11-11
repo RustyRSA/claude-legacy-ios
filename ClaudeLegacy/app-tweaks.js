@@ -898,6 +898,8 @@
   // Launch timeline
   // ---------------------------------------------------------------------------
   var launch = { dom: 0, firstModule: 0, interactive: 0, sendButton: 0, reported: false };
+  // patch.js reads sendButton to decide which modules the next launch reads ahead.
+  window.__appLaunchMarks = launch;
   var longTimers = [];
   var stalls = [];
   var nativeSetTimeout = window.setTimeout;
@@ -1203,15 +1205,29 @@
   // The top bar's buttons (chat title, "More options", share; incognito on a new
   // chat). Not the sidebar's: claude.ai's "Show sidebar" button sits inside the
   // collapsed sidebar panel (aside.dframe-sidebar), which must stay untouched.
+  // Only buttons that are on screen in the top strip and stay there: buttons of
+  // messages scrolled above the screen also have a small "top" (log 11 Nov: the
+  // reply toolbars were taken for the top bar, hidden, and searched for again at
+  // every scroll).
   function topBarButtons() {
     var out = [];
     var buttons = document.querySelectorAll("button");
     for (var i = 0; i < buttons.length; i++) {
       if (buttons[i].closest("aside")) continue;
       var box = buttons[i].getBoundingClientRect();
-      if (box.width > 0 && box.top < 60 && box.left > 40) out.push(buttons[i]);
+      if (box.width > 0 && box.top >= -1 && box.bottom <= 70 && box.left > 40 && pinned(buttons[i])) out.push(buttons[i]);
     }
     return out;
+  }
+  // Stays in place when the chat scrolls: outside every scroll area, or held by
+  // a sticky or fixed ancestor inside it.
+  function pinned(el) {
+    for (var node = el; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+      var style = getComputedStyle(node);
+      if (style.position === "sticky" || style.position === "fixed") return true;
+      if ((style.overflowY === "auto" || style.overflowY === "scroll") && node.scrollHeight > node.clientHeight + 1) return false;
+    }
+    return true;
   }
   // Found controls are kept until the address changes or one leaves the page,
   // so the page is not searched again after every change.
@@ -1245,7 +1261,13 @@
         groups.push(group);
       });
       c.topBar = groups;
-      found = { path: location.pathname, editor: c.editor, composer: c.composer, topBar: groups };
+      // How far down claude.ai's top bar reaches: the app's bar covers that much.
+      var topHeight = 0;
+      groups.forEach(function (g) {
+        var bottom = g.getBoundingClientRect().bottom;
+        if (bottom > topHeight && bottom <= 90) topHeight = bottom;
+      });
+      found = { path: location.pathname, editor: c.editor, composer: c.composer, topBar: groups, topHeight: Math.round(topHeight) };
     }
     c.more = null;
     c.topBar.some(function (g) { return (c.more = find('button[aria-label^="More options"]', g)); });
@@ -1341,7 +1363,7 @@
     return result;
   }
 
-  var lastHiddenNote = "";
+  var lastHiddenFound = null;
   function updateChrome() {
     var c = chromeControls();
     var kind = pageKind();
@@ -1354,11 +1376,13 @@
     // The sidebar button alone, never its panel: the native menu button covers it.
     setHidden(ready && !sidebar ? c.topBar.concat([c.composer, c.sidebarButton]).filter(Boolean) : []);
     if (ready && !sidebar) {
-      var note = kind + ": top bar " + (c.topBar.length ? c.topBar.map(describeElement).join(" + ") : "none") +
-        "; message box " + describeElement(c.composer);
-      if (note !== lastHiddenNote) {
-        lastHiddenNote = note;
-        record("chrome", "hidden " + note);
+      // Once per search of the page, not at every change of size or position.
+      if (found !== lastHiddenFound) {
+        lastHiddenFound = found;
+        record("chrome", "hidden " + kind + ": top bar " +
+          (c.topBar.length ? c.topBar.slice(0, 4).map(describeElement).join(" + ") : "none") +
+          (c.topBar.length > 4 ? " + " + (c.topBar.length - 4) + " more" : "") +
+          "; message box " + describeElement(c.composer));
       }
     }
     var model = find('button[aria-label^="Model:"]');
@@ -1370,6 +1394,8 @@
       why: kind === "other" ? "page " + location.pathname.split("/")[1] : missing.length ? "missing " + missing.join(", ") : "",
       page: kind,
       title: kind === "chat" ? chatTitle() : "",
+      topHeight: found ? found.topHeight || 0 : 0,
+      viewWidth: window.innerWidth || 0,
       sidebarOpen: sidebar,
       streaming: !!(c.composer && stopButton(c.composer)),
       model: words.join(" "),

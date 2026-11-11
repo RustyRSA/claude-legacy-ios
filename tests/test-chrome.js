@@ -119,7 +119,9 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   const CHAT_TOP = '<aside class="dframe-sidebar"><button aria-label="Show sidebar" data-rect="10,8,32,32">≡</button></aside>' +
     '<div data-rect="0,0,357,800"><div data-rect="46,8,180,32" id="titlegroup"><button aria-label="Chat, rename session" data-rect="46,10,24,32">t</button>' +
     '<button aria-label="More options for Chat" data-rect="60,10,32,32">…</button></div>' +
-    '<main data-rect="0,0,357,800"><div data-rect="267,8,82,32" id="sharegroup"><button aria-label="wiggle-controls-actions-share" data-rect="267,10,82,32">s</button></div></main></div>';
+    '<main data-rect="0,0,357,800"><div data-rect="267,8,82,32" id="sharegroup"><button aria-label="wiggle-controls-actions-share" data-rect="267,10,82,32">s</button></div>' +
+    // A reply's toolbar scrolled far above the screen: not part of the top bar.
+    '<div data-rect="82,-5404,132,24" id="replytools"><button aria-label="Copy" data-rect="82,-5404,24,24">c</button></div></main></div>';
   const chat = page(CHAT_TOP + COMPOSER, "https://claude.ai/chat/abc");
   await new Promise((res) => setTimeout(res, 50));
   const s3 = chat.posted[chat.posted.length - 1];
@@ -128,6 +130,8 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   const cd = chat.w.document;
   assert.ok(cd.getElementById("titlegroup").hasAttribute("data-app-hidden"), "title group hidden");
   assert.ok(cd.getElementById("sharegroup").hasAttribute("data-app-hidden"), "share group hidden");
+  assert.ok(!cd.getElementById("replytools").hasAttribute("data-app-hidden"), "reply toolbar above the screen untouched");
+  assert.strictEqual(s3.topHeight, 40, "how far claude.ai's top bar reaches");
   assert.ok(!cd.querySelector("aside").hasAttribute("data-app-hidden"), "sidebar panel untouched");
   assert.strictEqual(chat.w.__appChrome.run("more"), "ok");
   assert.strictEqual(chat.clicks[chat.clicks.length - 1], "More options for Chat");

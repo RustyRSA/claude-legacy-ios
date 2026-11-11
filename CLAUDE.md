@@ -154,8 +154,27 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   frames after taps, long timers, main-thread stalls, typing events and the IndexedDB
   probe only run when on. Turn it on before asking Logan for a timing log.
 - One list of injected scripts (`-installUserScripts`).
-- Not built yet: awaiting CI build and device check. Next: native chat list fed from
-  claude.ai's own chat-list responses (cached on the phone), native menus.
+- Built (`bc74865`, macos-15-intel; macos-15 had no machine free) and installed 11 Nov.
+- 13b (log 11 Nov 18:40, Logan: bars appear after ~5 s, come and go, buttons slow):
+  - Top-bar search took every button with `top < 60`, so reply toolbars scrolled above
+    the screen (top -5404) counted as top bar: they were hidden (also when scrolled back
+    into view) and, as the chat re-rendered them, the whole page was searched again at
+    every scroll. Now: on screen in the top strip (`top >= -1`, `bottom <= 70`) and
+    `pinned()` (outside every scroll area or under a sticky/fixed ancestor); the
+    "hidden" log line is written once per search.
+  - Bars shown from launch when they were in use last time (`NativeControlsWereReady`),
+    buttons off until the page reports; "not ready" on a chat/new page keeps the bars
+    (buttons off, 15 s limit) instead of hiding them; other pages hide at once.
+  - Top bar height follows claude.ai's own top bar (`topHeight` in the state, 51 CSS px
+    = 57 pt at 110 %), tallest seen kept (`NativeTopBarHeight`).
+  - Read-ahead list: modules asked for before the send button showed + 0.5 s (min 2.5 s,
+    max 10 s) instead of a fixed 2.5 s. After a claude.ai update the launch is slow
+    (send button 4.6 s), the fixed cut-off saved 71 of 963 modules, and the next launches
+    read the rest one by one (cache reads 38 s summed, send button 3.6 s).
+  - Same log: claude.ai now has 963 modules, its code runs 2,555 ms on the main thread
+    (was 1,450 ms for 831 on 5 Nov); sign-in cookie still missing at every launch.
+- Next: native chat list fed from claude.ai's own chat-list responses (cached on the
+  phone), native menus.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,

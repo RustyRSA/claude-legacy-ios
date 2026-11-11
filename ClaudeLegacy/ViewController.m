@@ -58,6 +58,12 @@ static NSString *const kPageScaleKey = @"PageScale";
 /// Detailed measurements for the debug log (off by default: they cost time on
 /// every launch and tap).
 static NSString *const kDiagnosticsKey = @"Diagnostics";
+/// The native controls were in use when the app last ran: they are then shown
+/// from the first moment of the next launch instead of when the page is ready.
+static NSString *const kChromeWasReadyKey = @"NativeControlsWereReady";
+/// Height of the native top bar below the status bar (points): what it takes to
+/// cover claude.ai's own top bar, as last reported by the page.
+static NSString *const kChromeTopHeightKey = @"NativeTopBarHeight";
 
 /// Events worth keeping across reloads and launches (sign-outs, the page process
 /// being stopped by iOS, session cookie changes, launch times). Shown at the top
@@ -311,6 +317,9 @@ API_AVAILABLE(ios(15.0))
 - (void)finishSend:(BOOL)sent;
 /// The app's message box has the keyboard.
 @property (nonatomic, readonly) BOOL editing;
+/// At launch, when the controls were in use last time: shown at once, with the
+/// buttons off until the page reports.
+- (void)showWhileLoading;
 /// The page's edge colours, and whether the page is dark (the controls then use
 /// the dark system colours whatever the phone is set to).
 - (void)setTopColor:(UIColor *)top bottomColor:(UIColor *)bottom dark:(BOOL)dark;
@@ -333,7 +342,11 @@ API_AVAILABLE(ios(15.0))
     UIButton *_micButton;
     UIButton *_actionButton;
     NSString *_actionName;
+    NSLayoutConstraint *_topBarBottom;
+    NSArray<UIButton *> *_buttons;
     BOOL _shown;
+    BOOL _waiting;
+    NSUInteger _waitToken;
     BOOL _streaming;
     BOOL _voice;
     BOOL _refocusAfterSend;
@@ -414,11 +427,14 @@ API_AVAILABLE(ios(15.0))
     for (UIView *view in @[_listButton, rightButtons, _titleLabel]) {
         [_topBar addSubview:view];
     }
+    CGFloat savedHeight = [NSUserDefaults.standardUserDefaults doubleForKey:kChromeTopHeightKey];
+    _topBarBottom = [_topBar.bottomAnchor constraintEqualToAnchor:safe.topAnchor
+                                                         constant:MIN(MAX(savedHeight, 44), 72)];
     [NSLayoutConstraint activateConstraints:@[
         [_topBar.topAnchor constraintEqualToAnchor:self.topAnchor],
         [_topBar.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
         [_topBar.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
-        [_topBar.bottomAnchor constraintEqualToAnchor:safe.topAnchor constant:44],
+        _topBarBottom,
         [_listButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:4],
         [_listButton.bottomAnchor constraintEqualToAnchor:_topBar.bottomAnchor],
         [rightButtons.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-4],
@@ -516,7 +532,82 @@ API_AVAILABLE(ios(15.0))
         [_actionButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
         [_actionButton.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor constant:-2],
     ]];
+    _buttons = @[_listButton, _incognitoButton, _newChatButton, _moreButton, _modelButton, _plusButton, _micButton, _actionButton];
     [self updateActionButton];
+}
+
+/// The bars stay up while the page is not ready (loading, or rebuilding itself),
+/// with the buttons off; if the page has not come back after 15 s they go.
+- (void)beginWaiting {
+    if (_waiting) {
+        return;
+    }
+    _waiting = YES;
+    for (UIButton *button in _buttons) {
+        button.enabled = NO;
+    }
+    NSUInteger token = ++_waitToken;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf && strongSelf->_waiting && strongSelf->_waitToken == token) {
+            strongSelf->_waiting = NO;
+            [strongSelf setShown:NO];
+        }
+    });
+}
+
+- (void)endWaiting {
+    if (!_waiting) {
+        return;
+    }
+    _waiting = NO;
+    _waitToken += 1;
+    for (UIButton *button in _buttons) {
+        button.enabled = YES;
+    }
+}
+
+- (void)showWhileLoading {
+    _shown = YES;
+    self.hidden = NO;
+    self.alpha = 1;
+    [self beginWaiting];
+}
+
+- (void)setShown:(BOOL)show {
+    if (show == _shown) {
+        return;
+    }
+    _shown = show;
+    if (!show && _textView.isFirstResponder) {
+        [_textView resignFirstResponder];
+    }
+    if (show) {
+        self.hidden = NO;
+    }
+    [UIView animateWithDuration:0.2 animations:^{
+        self.alpha = show ? 1 : 0;
+    } completion:^(BOOL finished) {
+        if (!self->_shown) {
+            self.hidden = YES;
+        }
+    }];
+}
+
+/// The top bar reaches as far down as claude.ai's own (CSS px, converted with
+/// the page's layout width); the tallest seen is kept so the bar does not jump
+/// between pages.
+- (void)coverTopHeight:(CGFloat)cssHeight viewWidth:(CGFloat)cssWidth {
+    if (cssHeight <= 0 || cssWidth <= 0 || self.bounds.size.width <= 0) {
+        return;
+    }
+    CGFloat points = ceil(cssHeight * self.bounds.size.width / cssWidth);
+    points = MIN(MAX(points, 44), 72);
+    if (points > _topBarBottom.constant) {
+        _topBarBottom.constant = points;
+        [NSUserDefaults.standardUserDefaults setDouble:points forKey:kChromeTopHeightKey];
+    }
 }
 
 - (void)setTopColor:(UIColor *)top bottomColor:(UIColor *)bottom dark:(BOOL)dark {
@@ -590,6 +681,16 @@ API_AVAILABLE(ios(15.0))
     BOOL sidebarOpen = [state[@"sidebarOpen"] boolValue];
     NSString *page = [state[@"page"] isKindOfClass:NSString.class] ? state[@"page"] : @"";
     BOOL inChat = [page isEqualToString:@"chat"];
+    // Not ready on a chat page means loading or a moment of rebuilding: the bars
+    // stay. Any other page (settings, sign-in) has no use for them.
+    if (!ready && _shown && ![page isEqualToString:@"other"]) {
+        [self beginWaiting];
+        return;
+    }
+    [self endWaiting];
+    if (ready) {
+        [self coverTopHeight:[state[@"topHeight"] doubleValue] viewWidth:[state[@"viewWidth"] doubleValue]];
+    }
     _streaming = [state[@"streaming"] boolValue];
     _voice = [state[@"voice"] boolValue];
 
@@ -605,24 +706,7 @@ API_AVAILABLE(ios(15.0))
     [self setModel:model effort:effort];
     [self updateActionButton];
 
-    BOOL show = ready && !sidebarOpen;
-    if (show == _shown) {
-        return;
-    }
-    _shown = show;
-    if (!show && _textView.isFirstResponder) {
-        [_textView resignFirstResponder];
-    }
-    if (show) {
-        self.hidden = NO;
-    }
-    [UIView animateWithDuration:0.2 animations:^{
-        self.alpha = show ? 1 : 0;
-    } completion:^(BOOL finished) {
-        if (!self->_shown) {
-            self.hidden = YES;
-        }
-    }];
+    [self setShown:ready && !sidebarOpen];
 }
 
 - (BOOL)editing {
@@ -933,6 +1017,9 @@ API_AVAILABLE(ios(15.0))
             [chrome.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         ]];
         self.nativeChrome = chrome;
+        if (SettingBool(kNativeChromeKey, YES) && SettingBool(kChromeWasReadyKey, NO)) {
+            [chrome showWhileLoading];
+        }
     }
 }
 
@@ -990,6 +1077,15 @@ API_AVAILABLE(ios(15.0))
     }
     if (@available(iOS 15.0, *)) {
         [(NativeChrome *)self.nativeChrome applyState:body];
+    }
+    // Remembered for the next launch: in use, or on a sign-in page.
+    NSDictionary *state = body;
+    NSString *why = [state[@"why"] isKindOfClass:NSString.class] ? state[@"why"] : @"";
+    BOOL wasReady = SettingBool(kChromeWasReadyKey, NO);
+    if ([state[@"ready"] boolValue] && !wasReady) {
+        [NSUserDefaults.standardUserDefaults setBool:YES forKey:kChromeWasReadyKey];
+    } else if (![state[@"ready"] boolValue] && wasReady && [why hasPrefix:@"page log"]) {
+        [NSUserDefaults.standardUserDefaults setBool:NO forKey:kChromeWasReadyKey];
     }
 }
 
@@ -1334,7 +1430,10 @@ API_AVAILABLE(ios(15.0))
             [NSUserDefaults.standardUserDefaults setBool:!nativeControls forKey:kNativeChromeKey];
             [weakSelf logEvent:[NSString stringWithFormat:@"native controls turned %@", nativeControls ? @"off" : @"on"]];
             if (@available(iOS 15.0, *)) {
-                [(NativeChrome *)weakSelf.nativeChrome applyState:@{@"ready": @NO}];
+                [(NativeChrome *)weakSelf.nativeChrome applyState:@{@"ready": @NO, @"page": @"other"}];
+                if (nativeControls) {
+                    [NSUserDefaults.standardUserDefaults setBool:NO forKey:kChromeWasReadyKey];
+                }
             }
             [weakSelf applySettingAndReload];
         }]];
