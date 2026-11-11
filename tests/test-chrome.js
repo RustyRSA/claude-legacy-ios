@@ -14,7 +14,9 @@ function page(html, url) {
   const w = dom.window;
   const posted = [];
   const clicks = [];
-  w.webkit = { messageHandlers: { chrome: { postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) }, appearance: { postMessage() {} } } };
+  const chatLists = [];
+  w.webkit = { messageHandlers: { chrome: { postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) }, appearance: { postMessage() {} },
+    chatList: { postMessage: (m) => chatLists.push(JSON.parse(JSON.stringify(m))) } } };
   w.__appSettings = { nativeChrome: 1 }; // as the app's JSON may send it
   w.document.addEventListener("click", (e) => clicks.push(e.target.getAttribute("aria-label") || e.target.getAttribute("href")), true);
   w.document.execCommand = (cmd, ui, text) => { w.__typed = text; return true; };
@@ -27,7 +29,7 @@ function page(html, url) {
     return { left: x, top: y, width: wd, height: h, right: x + wd, bottom: y + h };
   };
   w.eval(src);
-  return { w, posted, clicks };
+  return { w, posted, clicks, chatLists };
 }
 
 // As on claude.ai: "Show sidebar" lives in the collapsed sidebar panel, the top bar holds the rest.
@@ -134,6 +136,16 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(s3.topHeight, 40, "how far claude.ai's top bar reaches");
   assert.ok(!cd.querySelector("aside").hasAttribute("data-app-hidden"), "sidebar panel untouched");
   assert.strictEqual(chat.w.__appChrome.run("more"), "ok");
+
+  // The chat list claude.ai fetched goes to the app: id, name, time; anything
+  // that is not a chat is left out. Both shapes: a plain list and {data: [...]}.
+  const ID1 = "4407ad06-cdee-427d-ae9c-fb9a4db6c0d9", ID2 = "5681ff6f-e872-4539-91f3-c38fb5bc04e1";
+  chat.w.__appChrome.noteChatList([{ uuid: ID1, name: "First", updated_at: "2026-11-11T10:00:00Z" }, { uuid: "nope", name: "x" }]);
+  chat.w.__appChrome.noteChatList({ data: [{ uuid: ID2, name: "Second", updated_at: "2026-11-10T10:00:00Z" }], has_more: false });
+  assert.deepStrictEqual(chat.chatLists[0], { chats: [{ id: ID1, name: "First", updated: Date.parse("2026-11-11T10:00:00Z") }] });
+  assert.strictEqual(chat.chatLists[1].chats[0].name, "Second");
+  assert.ok(!/First|Second/.test(chat.w.__appDebugLog()), "chat names stay out of the debug log");
+  assert.strictEqual(chat.w.__appChrome.run("openChat", "../../evil"), "not a chat id");
   assert.strictEqual(chat.clicks[chat.clicks.length - 1], "More options for Chat");
 
   // Pages other than new chat and chats keep claude.ai's own controls.

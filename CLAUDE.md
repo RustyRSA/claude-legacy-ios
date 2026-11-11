@@ -74,6 +74,7 @@ Modules run in one of two ways (`patch.js`):
 
 | Path | What |
 |---|---|
+| `ClaudeLegacy/ChatListViewController.m` | Native chat list and its store (round 13c) |
 | `ClaudeLegacy/ViewController.m` | Native shell: web view, edge colour strips, menu, bridge handlers, crash recovery, session cookies, sign-in links, mic permission, debug log |
 | `ClaudeLegacy/app-tweaks.js` | Page-side app behaviour and diagnostics (see header comment) |
 | `ClaudeLegacy/patch.js` | Entry interception, module running, launch manifest |
@@ -173,8 +174,18 @@ without sudo — use it if the phone only accepts Logan's SSH key).
     read the rest one by one (cache reads 38 s summed, send button 3.6 s).
   - Same log: claude.ai now has 963 modules, its code runs 2,555 ms on the main thread
     (was 1,450 ms for 831 on 5 Nov); sign-in cookie still missing at every launch.
-- Next: native chat list fed from claude.ai's own chat-list responses (cached on the
-  phone), native menus.
+- 13c: native chat list (Phase C, first version). Page side: when claude.ai fetches
+  `/api/organizations/…/chat_conversations(_vN)`, ids, names and times go to the
+  `chatList` handler (no request of the app's own; if none seen after 8 s, the sidebar's
+  `aside a[href^="/chat/"]` links, without times). `ChatListStore`
+  (`ChatListViewController.m`, new file, added to the Xcode project by hand):
+  `Application Support/chat-list.plist`, not backed up, 500 chats, dropped when not
+  listed for 14 days; names never logged. The chat list button opens
+  `ChatListViewController` (search, New chat, chats, "Claude menu" = claude.ai's sidebar)
+  when the store has chats, also while the page loads. Picking a chat: page ready ->
+  `openChat` clicks claude.ai's own link (else `location.assign`); not ready -> the
+  address is loaded. Limit: only chats claude.ai has listed on this phone.
+- Next: native menus (+, model, "..."), check 13b/13c on device.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
@@ -446,7 +457,7 @@ Usability 3/4/8 · Performance 2/6/7-8 · Reliability 3/7/8 · Functional comple
 |---|---|---|
 | A | Native controls stage 1: verify on device, keep the last message clear of the native box, keyboard stays after sending | In progress (round 13 generic bars built on 12e, awaiting device check) |
 | B | Native menus: +, model, chat "..." as UIMenu filled from claude.ai's options | Next |
-| C | Native chat list: slide-in, cached on the phone (instant at launch), search | Planned |
+| C | Native chat list: cached on the phone (instant at launch), search | First version built (13c), awaiting device check |
 | D | Message styling: user bubble, serif replies, spacing, reply toolbar, scroll-down button | Planned |
 | E | Polish: haptics, edge swipe for the chat list, long-press menus, sheets for artifacts/files | Planned |
 | F | Reliability: why WebKit drops the sign-in cookie; alarm when claude.ai renames a label we use | Planned |

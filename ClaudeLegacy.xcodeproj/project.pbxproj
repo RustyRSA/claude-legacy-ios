@@ -12,6 +12,7 @@
 		CEADC8192F5E8F26000F74EA /* AppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = CEADC8182F5E8F26000F74EA /* AppDelegate.m */; };
 		CEADC8242F5E8F26000F74EA /* SceneDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = CEADC8232F5E8F26000F74EA /* SceneDelegate.m */; };
 		CEADC8272F5E8F26000F74EA /* ViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = CEADC8262F5E8F26000F74EA /* ViewController.m */; };
+		C1A7115700000000000000B1 /* ChatListViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = C1A7115700000000000000B2 /* ChatListViewController.m */; };
 		CEADC82A2F5E8F26000F74EA /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = CEADC8282F5E8F26000F74EA /* LaunchScreen.storyboard */; };
 		CEADC82D2F5E8F26000F74EA /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = CEADC82B2F5E8F26000F74EA /* Main.storyboard */; };
 		CEADC8312F5E8F29000F74EA /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = CEADC8302F5E8F29000F74EA /* main.m */; };
@@ -67,6 +68,8 @@
 		CEADC8232F5E8F26000F74EA /* SceneDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SceneDelegate.m; sourceTree = "<group>"; };
 		CEADC8252F5E8F26000F74EA /* ViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ViewController.h; sourceTree = "<group>"; };
 		CEADC8262F5E8F26000F74EA /* ViewController.m */ = {isa = PBXFileReference; indentWidth = 4; lastKnownFileType = sourcecode.c.objc; path = ViewController.m; sourceTree = "<group>"; tabWidth = 4; };
+		C1A7115700000000000000B2 /* ChatListViewController.m */ = {isa = PBXFileReference; indentWidth = 4; lastKnownFileType = sourcecode.c.objc; path = ChatListViewController.m; sourceTree = "<group>"; tabWidth = 4; };
+		C1A7115700000000000000B3 /* ChatListViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ChatListViewController.h; sourceTree = "<group>"; };
 		CEADC8292F5E8F26000F74EA /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		CEADC82C2F5E8F26000F74EA /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		CEADC82E2F5E8F29000F74EA /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -144,6 +147,8 @@
 				CEADC8232F5E8F26000F74EA /* SceneDelegate.m */,
 				CEADC8252F5E8F26000F74EA /* ViewController.h */,
 				CEADC8262F5E8F26000F74EA /* ViewController.m */,
+				C1A7115700000000000000B3 /* ChatListViewController.h */,
+				C1A7115700000000000000B2 /* ChatListViewController.m */,
 				E934A9713055443800056BAB /* legacy-transpiler.js */,
 				CEADC8282F5E8F26000F74EA /* LaunchScreen.storyboard */,
 				CEADC82B2F5E8F26000F74EA /* Main.storyboard */,
@@ -311,6 +316,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CEADC8272F5E8F26000F74EA /* ViewController.m in Sources */,
+				C1A7115700000000000000B1 /* ChatListViewController.m in Sources */,
 				E9AA10032FD0000000000003 /* LoadingOverlayView.m in Sources */,
 				CE123A5C2F5EDE2D008A1A3A /* PolyfillsLoader.m in Sources */,
 				CEADC8192F5E8F26000F74EA /* AppDelegate.m in Sources */,

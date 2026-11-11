@@ -858,6 +858,59 @@
       ", store requests open " + (s.storeInFlight || 0) + ", batches read " + (s.batchesRead || 0) + "/" + (s.batches || 0));
   }
 
+  // The app's native chat list: when claude.ai fetches its own list of chats,
+  // their ids, names and times are handed to the app (kept on the phone, shown
+  // from the chat list button). No request of the app's own is made, and names
+  // never go to the debug log.
+  var CHAT_LIST_PATH = /^\/api\/organizations\/…\/chat_conversations(_v\d+)?$/;
+  var CHAT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  var chatListPosts = 0;
+  var chatListCount = 0;
+  function chatItems(json) {
+    if (Array.isArray(json)) return json;
+    if (json && typeof json === "object") {
+      for (var key in json) {
+        var list = json[key];
+        if (Array.isArray(list) && list.length && list[0] && typeof (list[0].uuid || list[0].id) === "string") return list;
+      }
+    }
+    return [];
+  }
+  function postChats(chats, source) {
+    if (!chats.length) return;
+    chatListPosts++;
+    chatListCount += chats.length;
+    if (chatListPosts <= 6) record("chrome", "chat list: " + chats.length + " chats from " + source);
+    try {
+      window.webkit.messageHandlers.chatList.postMessage({ chats: chats });
+    } catch (e) {}
+  }
+  function noteChatList(json) {
+    var chats = [];
+    chatItems(json).forEach(function (item) {
+      var id = item && String(item.uuid || item.id || "");
+      if (!id || !CHAT_ID.test(id) || chats.length >= 300) return;
+      var updated = Date.parse(item.updated_at || item.created_at || "");
+      chats.push({ id: id, name: String(item.name || item.title || "").slice(0, 200), updated: updated > 0 ? updated : 0 });
+    });
+    postChats(chats, "claude.ai's list");
+  }
+  // When no list was seen (claude.ai changed its address or shape): the chat
+  // links claude.ai drew in its sidebar, without times.
+  function chatsFromPage() {
+    if (chatListPosts) return;
+    var seen = {};
+    var chats = [];
+    var links = document.querySelectorAll('aside a[href^="/chat/"]');
+    for (var i = 0; i < links.length && chats.length < 300; i++) {
+      var id = String(links[i].getAttribute("href")).slice(6).split(/[?#/]/)[0];
+      if (!CHAT_ID.test(id) || seen[id]) continue;
+      seen[id] = true;
+      chats.push({ id: id, name: String(links[i].textContent || "").trim().slice(0, 200), updated: 0 });
+    }
+    postChats(chats, "the page's links");
+  }
+
   var nativeFetch = window.fetch;
   if (typeof nativeFetch === "function") {
     window.fetch = function (input, init) {
@@ -869,6 +922,9 @@
         var startedAt = performance.now();
         promise.then(function (response) {
           noteApi(path, method, startedAt, response.status, response, url);
+          if (NATIVE_CHROME && method === "GET" && response.status === 200 && CHAT_LIST_PATH.test(path)) {
+            response.clone().json().then(noteChatList, function () {});
+          }
         }, function (error) {
           noteApi(path, method, startedAt, "failed", null, url);
           noteFailedRequest(path, method, startedAt, error, init);
@@ -1523,6 +1579,7 @@
   }
 
   window.__appChrome = {
+    noteChatList: noteChatList,
     run: function (name, arg) {
       var c = chromeControls();
       var result;
@@ -1533,6 +1590,16 @@
           var link = find('a[href="/new"]');
           if (link) link.click();
           else location.assign("/new");
+          result = "ok";
+          break;
+        case "openChat":
+          // From the app's chat list: claude.ai's own link to that chat when it
+          // has one (no reload), else the chat's address.
+          var chatId = String(arg || "");
+          if (!CHAT_ID.test(chatId)) { result = "not a chat id"; break; }
+          var chatLink = find('a[href="/chat/' + chatId + '"]');
+          if (chatLink) chatLink.click();
+          else location.assign("/chat/" + chatId);
           result = "ok";
           break;
         case "more": result = press(c.more, "chat menu"); break;
@@ -1567,13 +1634,15 @@
     } catch (e) {}
     document.addEventListener("touchend", function () { nativeSetTimeout(updateChrome, 350); }, { passive: true, capture: true });
     setInterval(updateChrome, 1000);
+    nativeSetTimeout(chatsFromPage, 8000);
     updateChrome();
   }
 
   function chromeSummary() {
     if (!NATIVE_CHROME) return ["native controls: off"];
     var s = chromeState;
-    return ["native controls: on, " + (s.ready ? "in use" : "not in use (" + s.why + ")") +
+    return ["chat list: " + chatListCount + " chats handed to the app in " + chatListPosts + " reports",
+      "native controls: on, " + (s.ready ? "in use" : "not in use (" + s.why + ")") +
       (s.ready ? ", page " + s.page + ", sidebar " + (s.sidebarOpen ? "open" : "closed") +
         ", answering " + (s.streaming ? "yes" : "no") + ", model " + (s.model || "?") + (s.effort ? " " + s.effort : "") : "")];
   }

@@ -10,6 +10,7 @@
 #import "ViewController.h"
 #import "PolyfillsLoader.h"
 #import "LoadingOverlayView.h"
+#import "ChatListViewController.h"
 
 #import <WebKit/WebKit.h>
 #import <SafariServices/SafariServices.h>
@@ -532,7 +533,8 @@ API_AVAILABLE(ios(15.0))
         [_actionButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
         [_actionButton.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor constant:-2],
     ]];
-    _buttons = @[_listButton, _incognitoButton, _newChatButton, _moreButton, _modelButton, _plusButton, _micButton, _actionButton];
+    // Not the chat list button: the list works while the page still loads.
+    _buttons = @[_incognitoButton, _newChatButton, _moreButton, _modelButton, _plusButton, _micButton, _actionButton];
     [self updateActionButton];
 }
 
@@ -806,6 +808,10 @@ API_AVAILABLE(ios(15.0))
 @property (nonatomic, assign) NSInteger offeredPasteboardChange;
 /// The native top buttons and message box (NativeChrome, iOS 15 and later).
 @property (nonatomic, strong, nullable) UIView *nativeChrome;
+/// The page reported that the native controls are in use (its controls found).
+@property (nonatomic, assign) BOOL chromeReady;
+/// A chat picked from the native list before the first page load: loaded first.
+@property (nonatomic, strong, nullable) NSURL *launchURL;
 
 @end
 
@@ -901,6 +907,7 @@ API_AVAILABLE(ios(15.0))
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"appearance"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"appEvent"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"chrome"];
+    [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"chatList"];
     [self installNativeChrome];
     // Again now that the native bars exist: they take the same colours.
     [self applyEdgeReport:[[NSUserDefaults standardUserDefaults] objectForKey:kEdgeColoursKey] animated:NO];
@@ -1007,6 +1014,11 @@ API_AVAILABLE(ios(15.0))
         NativeChrome *chrome = [[NativeChrome alloc] initWithFrame:CGRectZero];
         __weak typeof(self) weakSelf = self;
         chrome.onAction = ^(NSString *name, NSString *argument) {
+            // The chat list button opens the native list when it has chats;
+            // otherwise claude.ai's own sidebar, as before.
+            if ([name isEqualToString:@"sidebar"] && [weakSelf presentChatList]) {
+                return;
+            }
             [weakSelf runChromeAction:name argument:argument];
         };
         [self.view insertSubview:chrome aboveSubview:self.webView];
@@ -1021,6 +1033,49 @@ API_AVAILABLE(ios(15.0))
             [chrome showWhileLoading];
         }
     }
+}
+
+#pragma mark - Native chat list
+
+/// The chats the page has listed so far (ChatListStore), as a native list. NO
+/// when there is nothing to show yet.
+- (BOOL)presentChatList {
+    if ([ChatListStore chats].count == 0) {
+        return NO;
+    }
+    ChatListViewController *list = [[ChatListViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    __weak typeof(self) weakSelf = self;
+    list.onOpenChat = ^(NSString *chatID) {
+        [weakSelf openPath:[@"/chat/" stringByAppendingString:chatID] action:@"openChat" argument:chatID];
+    };
+    list.onNewChat = ^{
+        [weakSelf openPath:@"/new" action:@"newChat" argument:nil];
+    };
+    list.onShowClaudeMenu = ^{
+        [weakSelf runChromeAction:@"sidebar" argument:nil];
+    };
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:list];
+    navigation.overrideUserInterfaceStyle = self.nativeChrome.overrideUserInterfaceStyle;
+    [[self topPresenter] presentViewController:navigation animated:YES completion:nil];
+    return YES;
+}
+
+/// With the page ready, claude.ai itself goes there (no reload); while it still
+/// loads, the address is loaded instead.
+- (void)openPath:(NSString *)path action:(NSString *)action argument:(NSString *)argument {
+    if (self.chromeReady) {
+        [self runChromeAction:action argument:argument];
+        return;
+    }
+    NSURL *url = [NSURL URLWithString:[@"https://claude.ai" stringByAppendingString:path]];
+    if (url == nil) {
+        return;
+    }
+    if (!self.startedLoading) {
+        self.launchURL = url;
+        return;
+    }
+    [self.webView loadRequest:[NSURLRequest requestWithURL:url]];
 }
 
 /// Asks the page to press one of claude.ai's controls (app-tweaks.js,
@@ -1075,6 +1130,7 @@ API_AVAILABLE(ios(15.0))
     if (![body isKindOfClass:NSDictionary.class]) {
         return;
     }
+    self.chromeReady = [((NSDictionary *)body)[@"ready"] boolValue];
     if (@available(iOS 15.0, *)) {
         [(NativeChrome *)self.nativeChrome applyState:body];
     }
@@ -1117,7 +1173,9 @@ API_AVAILABLE(ios(15.0))
             return;
         }
         strongSelf.startedLoading = YES;
-        [strongSelf.webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"https://claude.ai"]]];
+        NSURL *first = strongSelf.launchURL ?: [NSURL URLWithString:@"https://claude.ai"];
+        strongSelf.launchURL = nil;
+        [strongSelf.webView loadRequest:[NSURLRequest requestWithURL:first]];
         // Started from a link: offer it once the app is on screen.
         [strongSelf presentQueuedURLIfAny];
 //        [_webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"http://192.168.1.136:3000"]]];
@@ -2407,6 +2465,7 @@ API_AVAILABLE(ios(15.0))
 }
 
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
+    self.chromeReady = NO; // a new page: its controls are not found yet
     if ([self isLoadingOverlayVisible] && self.modulesDone == 0) {
         [self.loadingOverlay setStage:@"Loading page" detail:webView.URL.path];
         [self noteActivity];
@@ -2553,6 +2612,15 @@ API_AVAILABLE(ios(15.0))
 
     if ([message.name isEqualToString:@"chrome"]) {
         [self handleChromeState:message.body];
+        return;
+    }
+
+    if ([message.name isEqualToString:@"chatList"]) {
+        // Ids, names and times of the chats claude.ai listed; names are not logged.
+        id chats = [message.body isKindOfClass:NSDictionary.class] ? message.body[@"chats"] : nil;
+        if ([chats isKindOfClass:NSArray.class]) {
+            [ChatListStore mergeChats:chats];
+        }
         return;
     }
 
