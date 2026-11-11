@@ -17,6 +17,7 @@ const dom = new JSDOM(html, { runScripts: "outside-only", url: "https://claude.a
 const w = dom.window;
 const $ = (id) => w.document.getElementById(id);
 const posted = [];
+w.__appSettings = { diagnostics: true }; // the measurements checked below
 w.webkit = { messageHandlers: { appearance: { postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) } } };
 let overlayShown = false;
 w.document.elementsFromPoint = (x, y) => (y < 10

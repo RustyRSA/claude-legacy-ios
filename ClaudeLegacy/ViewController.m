@@ -55,6 +55,9 @@ static NSString *const kFastLoadKey = @"FastLoading";
 static NSString *const kTapFixKey = @"TapFix";
 static NSString *const kNativeChromeKey = @"NativeControls";
 static NSString *const kPageScaleKey = @"PageScale";
+/// Detailed measurements for the debug log (off by default: they cost time on
+/// every launch and tap).
+static NSString *const kDiagnosticsKey = @"Diagnostics";
 
 /// Events worth keeping across reloads and launches (sign-outs, the page process
 /// being stopped by iOS, session cookie changes, launch times). Shown at the top
@@ -285,54 +288,21 @@ API_AVAILABLE(ios(14.0))
 
 #pragma mark - Native controls
 
-/// A colour for light and for dark appearance, given as 0xRRGGBB.
-static UIColor *ThemedColor(UInt32 light, UInt32 dark) {
-    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
-        UInt32 value = traits.userInterfaceStyle == UIUserInterfaceStyleDark ? dark : light;
-        return [UIColor colorWithRed:((value >> 16) & 0xFF) / 255.0
-                               green:((value >> 8) & 0xFF) / 255.0
-                                blue:(value & 0xFF) / 255.0
-                               alpha:1.0];
-    }];
-}
-
-/// The incognito ghost: the iPhone app's icon, which SF Symbols on iOS 16 lacks.
-static UIImage *GhostImage(void) {
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(22, 22)];
-    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        UIBezierPath *body = [UIBezierPath bezierPath];
-        [body moveToPoint:CGPointMake(3, 20)];
-        [body addLineToPoint:CGPointMake(3, 10)];
-        [body addArcWithCenter:CGPointMake(11, 10) radius:8 startAngle:M_PI endAngle:0 clockwise:YES];
-        [body addLineToPoint:CGPointMake(19, 20)];
-        CGFloat xs[] = {16.33, 13.67, 11.0, 8.33, 5.67, 3.0};
-        for (int i = 0; i < 6; i++) {
-            [body addLineToPoint:CGPointMake(xs[i], i % 2 == 0 ? 17.5 : 20)];
-        }
-        [body closePath];
-        body.lineWidth = 1.7;
-        body.lineJoinStyle = kCGLineJoinRound;
-        [UIColor.blackColor setStroke];
-        [body stroke];
-        [UIColor.blackColor setFill];
-        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(6.8, 9.3, 2.4, 2.4)] fill];
-        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(12.8, 9.3, 2.4, 2.4)] fill];
-    }];
-    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-}
-
-static UIImage *SymbolImage(NSString *name, CGFloat pointSize) {
+static UIImage *SymbolImage(NSString *name, CGFloat pointSize, UIImageSymbolWeight weight) {
     UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:pointSize
-                                                                                         weight:UIImageSymbolWeightRegular];
+                                                                                         weight:weight];
     return [UIImage systemImageNamed:name withConfiguration:config];
 }
 
-/// The iPhone app's controls, drawn natively over the page: a round menu button
-/// at the top left, the incognito button (new chat) or a new-chat and "..." pill
-/// (in a chat) at the top right, and the message box card at the bottom. Each
-/// button asks the page to press claude.ai's own control (onAction); the page
-/// reports which controls it found and claude.ai's state (applyState:). Touches
-/// outside the controls go through to the page.
+/// Standard iOS controls drawn over the page, as in any chat app: a bar at the
+/// top (chat list button, the chat's title, new chat and "..." buttons) and a
+/// message bar at the bottom (+, model, a text field that grows, dictation and
+/// one send / stop / voice button). System colours, tint and SF Symbols only.
+/// Both bars are solid and take the page's own edge colours, so they cover
+/// claude.ai's header and message box. Each button asks the page to press
+/// claude.ai's own control (onAction); the page reports which controls it found
+/// and claude.ai's state (applyState:). Touches between the bars go through to
+/// the page.
 API_AVAILABLE(ios(15.0))
 @interface NativeChrome : UIView <UITextViewDelegate>
 @property (nonatomic, copy) void (^onAction)(NSString *name, NSString *argument);
@@ -341,15 +311,20 @@ API_AVAILABLE(ios(15.0))
 - (void)finishSend:(BOOL)sent;
 /// The app's message box has the keyboard.
 @property (nonatomic, readonly) BOOL editing;
+/// The page's edge colours, and whether the page is dark (the controls then use
+/// the dark system colours whatever the phone is set to).
+- (void)setTopColor:(UIColor *)top bottomColor:(UIColor *)bottom dark:(BOOL)dark;
 @end
 
 @implementation NativeChrome {
-    UIButton *_menuButton;
+    UIView *_topBar;
+    UIView *_bottomBar;
+    UILabel *_titleLabel;
+    UIButton *_listButton;
     UIButton *_incognitoButton;
-    UIView *_pill;
     UIButton *_newChatButton;
     UIButton *_moreButton;
-    UIView *_card;
+    UIView *_field;
     UITextView *_textView;
     UILabel *_placeholder;
     NSLayoutConstraint *_textHeight;
@@ -380,160 +355,183 @@ API_AVAILABLE(ios(15.0))
     return hit == self ? nil : hit;
 }
 
-+ (UIColor *)floatingColor { return ThemedColor(0xFFFFFF, 0x30302E); }
-+ (UIColor *)chipColor { return ThemedColor(0xF0EEE6, 0x3D3D3A); }
-
-- (void)addShadowTo:(UIView *)view {
-    view.layer.shadowColor = UIColor.blackColor.CGColor;
-    view.layer.shadowOpacity = 0.08;
-    view.layer.shadowRadius = 10;
-    view.layer.shadowOffset = CGSizeMake(0, 2);
-}
-
-- (UIButton *)circleButton:(UIImage *)image
-                  diameter:(CGFloat)diameter
-                background:(UIColor *)background
-                    action:(SEL)action
-                     label:(NSString *)label
-{
+- (UIButton *)barButton:(NSString *)symbol action:(SEL)action label:(NSString *)label {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.translatesAutoresizingMaskIntoConstraints = NO;
-    [button setImage:image forState:UIControlStateNormal];
-    button.tintColor = UIColor.labelColor;
-    button.backgroundColor = background;
-    button.layer.cornerRadius = diameter / 2;
+    [button setImage:SymbolImage(symbol, 19, UIImageSymbolWeightRegular) forState:UIControlStateNormal];
     button.accessibilityLabel = label;
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     [NSLayoutConstraint activateConstraints:@[
-        [button.widthAnchor constraintEqualToConstant:diameter],
-        [button.heightAnchor constraintEqualToConstant:diameter],
+        [button.widthAnchor constraintEqualToConstant:44],
+        [button.heightAnchor constraintEqualToConstant:44],
     ]];
     return button;
 }
 
+/// A solid bar with a hairline along the edge that faces the page.
+- (UIView *)barWithLineAtTop:(BOOL)lineAtTop {
+    UIView *bar = [[UIView alloc] init];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    bar.backgroundColor = AppBackgroundColor();
+    UIView *line = [[UIView alloc] init];
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    line.backgroundColor = UIColor.separatorColor;
+    [bar addSubview:line];
+    [NSLayoutConstraint activateConstraints:@[
+        [line.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor],
+        [line.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor],
+        [line.heightAnchor constraintEqualToConstant:1.0 / MAX(UIScreen.mainScreen.scale, 1.0)],
+        lineAtTop ? [line.topAnchor constraintEqualToAnchor:bar.topAnchor]
+                  : [line.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor],
+    ]];
+    [self addSubview:bar];
+    return bar;
+}
+
 - (void)buildControls {
-    UIColor *floating = [NativeChrome floatingColor];
-    UIColor *chip = [NativeChrome chipColor];
     UILayoutGuide *safe = self.safeAreaLayoutGuide;
 
-    _menuButton = [self circleButton:SymbolImage(@"line.3.horizontal", 18) diameter:48 background:floating
-                              action:@selector(menuTapped) label:@"Chats"];
-    [self addShadowTo:_menuButton];
-    _incognitoButton = [self circleButton:GhostImage() diameter:48 background:floating
-                                   action:@selector(incognitoTapped) label:@"Incognito chat"];
-    [self addShadowTo:_incognitoButton];
+    // The top bar.
+    _topBar = [self barWithLineAtTop:NO];
+    _listButton = [self barButton:@"sidebar.left" action:@selector(menuTapped) label:@"Chats"];
+    _incognitoButton = [self barButton:@"eye.slash" action:@selector(incognitoTapped) label:@"Incognito chat"];
+    _newChatButton = [self barButton:@"square.and.pencil" action:@selector(newChatTapped) label:@"New chat"];
+    _moreButton = [self barButton:@"ellipsis.circle" action:@selector(moreTapped) label:@"Chat options"];
 
-    _pill = [[UIView alloc] init];
-    _pill.translatesAutoresizingMaskIntoConstraints = NO;
-    _pill.backgroundColor = floating;
-    _pill.layer.cornerRadius = 24;
-    [self addShadowTo:_pill];
-    _newChatButton = [self circleButton:SymbolImage(@"plus.bubble.fill", 20) diameter:44 background:UIColor.clearColor
-                                 action:@selector(newChatTapped) label:@"New chat"];
-    _moreButton = [self circleButton:SymbolImage(@"ellipsis", 17) diameter:44 background:UIColor.clearColor
-                              action:@selector(moreTapped) label:@"Chat options"];
-    [_pill addSubview:_newChatButton];
-    [_pill addSubview:_moreButton];
+    UIStackView *rightButtons = [[UIStackView alloc] initWithArrangedSubviews:@[_incognitoButton, _newChatButton, _moreButton]];
+    rightButtons.translatesAutoresizingMaskIntoConstraints = NO;
+    rightButtons.axis = UILayoutConstraintAxisHorizontal;
 
-    for (UIView *view in @[_menuButton, _incognitoButton, _pill]) {
-        [self addSubview:view];
+    _titleLabel = [[UILabel alloc] init];
+    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    _titleLabel.textColor = UIColor.labelColor;
+    _titleLabel.textAlignment = NSTextAlignmentCenter;
+    _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    _titleLabel.text = @"New chat";
+    [_titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+
+    for (UIView *view in @[_listButton, rightButtons, _titleLabel]) {
+        [_topBar addSubview:view];
     }
     [NSLayoutConstraint activateConstraints:@[
-        [_menuButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:16],
-        [_menuButton.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
-        [_incognitoButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
-        [_incognitoButton.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
-        [_pill.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
-        [_pill.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
-        [_pill.heightAnchor constraintEqualToConstant:48],
-        [_newChatButton.leadingAnchor constraintEqualToAnchor:_pill.leadingAnchor constant:6],
-        [_newChatButton.centerYAnchor constraintEqualToAnchor:_pill.centerYAnchor],
-        [_moreButton.leadingAnchor constraintEqualToAnchor:_newChatButton.trailingAnchor constant:2],
-        [_moreButton.trailingAnchor constraintEqualToAnchor:_pill.trailingAnchor constant:-6],
-        [_moreButton.centerYAnchor constraintEqualToAnchor:_pill.centerYAnchor],
+        [_topBar.topAnchor constraintEqualToAnchor:self.topAnchor],
+        [_topBar.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [_topBar.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [_topBar.bottomAnchor constraintEqualToAnchor:safe.topAnchor constant:44],
+        [_listButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:4],
+        [_listButton.bottomAnchor constraintEqualToAnchor:_topBar.bottomAnchor],
+        [rightButtons.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-4],
+        [rightButtons.bottomAnchor constraintEqualToAnchor:_topBar.bottomAnchor],
+        [_titleLabel.centerXAnchor constraintEqualToAnchor:_topBar.centerXAnchor],
+        [_titleLabel.centerYAnchor constraintEqualToAnchor:_listButton.centerYAnchor],
+        [_titleLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:_listButton.trailingAnchor constant:4],
+        [_titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:rightButtons.leadingAnchor constant:-4],
     ]];
 
-    // The message box card.
-    _card = [[UIView alloc] init];
-    _card.translatesAutoresizingMaskIntoConstraints = NO;
-    _card.backgroundColor = floating;
-    _card.layer.cornerRadius = 26;
-    [self addShadowTo:_card];
-    [self addSubview:_card];
+    // The message bar.
+    _bottomBar = [self barWithLineAtTop:YES];
+
+    UIButtonConfiguration *modelConfig = [UIButtonConfiguration plainButtonConfiguration];
+    modelConfig.contentInsets = NSDirectionalEdgeInsetsMake(0, 8, 0, 8);
+    modelConfig.image = SymbolImage(@"chevron.down", 10, UIImageSymbolWeightSemibold);
+    modelConfig.imagePlacement = NSDirectionalRectEdgeTrailing;
+    modelConfig.imagePadding = 4;
+    modelConfig.baseForegroundColor = UIColor.secondaryLabelColor;
+    _modelButton = [UIButton buttonWithConfiguration:modelConfig primaryAction:nil];
+    _modelButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _modelButton.accessibilityLabel = @"Model";
+    [_modelButton addTarget:self action:@selector(modelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self setModel:@"" effort:@""];
+
+    _plusButton = [self barButton:@"plus" action:@selector(plusTapped) label:@"Add files"];
+
+    _field = [[UIView alloc] init];
+    _field.translatesAutoresizingMaskIntoConstraints = NO;
+    _field.backgroundColor = UIColor.tertiarySystemFillColor;
+    _field.layer.cornerRadius = 18;
 
     _textView = [[UITextView alloc] init];
     _textView.translatesAutoresizingMaskIntoConstraints = NO;
     _textView.font = [UIFont systemFontOfSize:17];
     _textView.textColor = UIColor.labelColor;
     _textView.backgroundColor = UIColor.clearColor;
-    _textView.textContainerInset = UIEdgeInsetsMake(8, 4, 8, 4);
+    _textView.textContainerInset = UIEdgeInsetsMake(8, 0, 8, 0);
     _textView.scrollEnabled = NO;
     _textView.delegate = self;
-    [_card addSubview:_textView];
 
     _placeholder = [[UILabel alloc] init];
     _placeholder.translatesAutoresizingMaskIntoConstraints = NO;
     _placeholder.font = [UIFont systemFontOfSize:17];
     _placeholder.textColor = UIColor.placeholderTextColor;
-    _placeholder.text = @"Chat with Claude";
+    _placeholder.text = @"Message";
     _placeholder.userInteractionEnabled = NO;
-    [_card addSubview:_placeholder];
 
-    _plusButton = [self circleButton:SymbolImage(@"plus", 17) diameter:40 background:chip
-                              action:@selector(plusTapped) label:@"Add files"];
-    _micButton = [self circleButton:SymbolImage(@"mic", 17) diameter:40 background:chip
-                             action:@selector(micTapped) label:@"Dictate"];
-    _actionButton = [self circleButton:SymbolImage(@"waveform", 17) diameter:40 background:UIColor.labelColor
-                                action:@selector(actionTapped) label:@"Voice mode"];
+    _micButton = [self barButton:@"mic" action:@selector(micTapped) label:@"Dictate"];
+    _micButton.tintColor = UIColor.secondaryLabelColor;
 
-    UIButtonConfiguration *modelConfig = [UIButtonConfiguration plainButtonConfiguration];
-    modelConfig.contentInsets = NSDirectionalEdgeInsetsMake(0, 14, 0, 14);
-    UIBackgroundConfiguration *modelBackground = [UIBackgroundConfiguration clearConfiguration];
-    modelBackground.backgroundColor = chip;
-    modelConfig.background = modelBackground;
-    modelConfig.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-    _modelButton = [UIButton buttonWithConfiguration:modelConfig primaryAction:nil];
-    _modelButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _modelButton.accessibilityLabel = @"Model";
-    [_modelButton addTarget:self action:@selector(modelTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self setModel:@"Claude" effort:@""];
+    _actionButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _actionButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _actionButton.layer.cornerRadius = 16;
+    [_actionButton addTarget:self action:@selector(actionTapped) forControlEvents:UIControlEventTouchUpInside];
 
-    for (UIView *view in @[_plusButton, _modelButton, _micButton, _actionButton]) {
-        [_card addSubview:view];
+    for (UIView *view in @[_textView, _placeholder, _micButton]) {
+        [_field addSubview:view];
+    }
+    for (UIView *view in @[_modelButton, _plusButton, _field, _actionButton]) {
+        [_bottomBar addSubview:view];
     }
 
-    _textHeight = [_textView.heightAnchor constraintEqualToConstant:40];
+    _textHeight = [_textView.heightAnchor constraintEqualToConstant:36];
     [NSLayoutConstraint activateConstraints:@[
-        [_card.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
-        [_card.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
-        [_card.bottomAnchor constraintEqualToAnchor:self.keyboardLayoutGuide.topAnchor constant:-8],
-        [_textView.topAnchor constraintEqualToAnchor:_card.topAnchor constant:8],
-        [_textView.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:10],
-        [_textView.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-10],
+        [_bottomBar.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [_bottomBar.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [_bottomBar.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+        [_bottomBar.topAnchor constraintEqualToAnchor:_modelButton.topAnchor constant:-4],
+
+        [_modelButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:8],
+        [_modelButton.heightAnchor constraintEqualToConstant:30],
+        [_modelButton.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-8],
+        [_modelButton.bottomAnchor constraintEqualToAnchor:_field.topAnchor constant:-2],
+
+        [_plusButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:4],
+        [_plusButton.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor constant:4],
+
+        [_field.leadingAnchor constraintEqualToAnchor:_plusButton.trailingAnchor constant:2],
+        [_field.trailingAnchor constraintEqualToAnchor:_actionButton.leadingAnchor constant:-8],
+        [_field.bottomAnchor constraintEqualToAnchor:self.keyboardLayoutGuide.topAnchor constant:-8],
+
+        [_textView.topAnchor constraintEqualToAnchor:_field.topAnchor],
+        [_textView.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor],
+        [_textView.leadingAnchor constraintEqualToAnchor:_field.leadingAnchor constant:8],
+        [_textView.trailingAnchor constraintEqualToAnchor:_micButton.leadingAnchor],
         _textHeight,
-        [_placeholder.leadingAnchor constraintEqualToAnchor:_textView.leadingAnchor constant:9],
-        [_placeholder.centerYAnchor constraintEqualToAnchor:_textView.topAnchor constant:20],
-        [_plusButton.topAnchor constraintEqualToAnchor:_textView.bottomAnchor constant:6],
-        [_plusButton.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:10],
-        [_plusButton.bottomAnchor constraintEqualToAnchor:_card.bottomAnchor constant:-10],
-        [_modelButton.leadingAnchor constraintEqualToAnchor:_plusButton.trailingAnchor constant:8],
-        [_modelButton.centerYAnchor constraintEqualToAnchor:_plusButton.centerYAnchor],
-        [_modelButton.heightAnchor constraintEqualToConstant:40],
-        [_modelButton.trailingAnchor constraintLessThanOrEqualToAnchor:_micButton.leadingAnchor constant:-8],
-        [_actionButton.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-10],
-        [_actionButton.centerYAnchor constraintEqualToAnchor:_plusButton.centerYAnchor],
-        [_micButton.trailingAnchor constraintEqualToAnchor:_actionButton.leadingAnchor constant:-8],
-        [_micButton.centerYAnchor constraintEqualToAnchor:_plusButton.centerYAnchor],
+        [_placeholder.leadingAnchor constraintEqualToAnchor:_textView.leadingAnchor constant:5],
+        [_placeholder.centerYAnchor constraintEqualToAnchor:_textView.topAnchor constant:18],
+        [_micButton.trailingAnchor constraintEqualToAnchor:_field.trailingAnchor],
+        [_micButton.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor constant:4],
+
+        [_actionButton.widthAnchor constraintEqualToConstant:32],
+        [_actionButton.heightAnchor constraintEqualToConstant:32],
+        [_actionButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+        [_actionButton.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor constant:-2],
     ]];
     [self updateActionButton];
 }
 
+- (void)setTopColor:(UIColor *)top bottomColor:(UIColor *)bottom dark:(BOOL)dark {
+    _topBar.backgroundColor = top;
+    _bottomBar.backgroundColor = bottom;
+    self.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+}
+
 - (void)setModel:(NSString *)model effort:(NSString *)effort {
+    UIFont *font = [UIFont systemFontOfSize:15];
     NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:model.length ? model : @"Model"
-        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:16], NSForegroundColorAttributeName: UIColor.labelColor}];
+        attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.secondaryLabelColor}];
     if (effort.length) {
         [title appendAttributedString:[[NSAttributedString alloc] initWithString:[@" " stringByAppendingString:effort]
-            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:16], NSForegroundColorAttributeName: UIColor.secondaryLabelColor}]];
+            attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.tertiaryLabelColor}]];
     }
     UIButtonConfiguration *config = _modelButton.configuration;
     config.attributedTitle = title;
@@ -544,33 +542,34 @@ API_AVAILABLE(ios(15.0))
     return [_textView.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
 }
 
-/// One button at the right of the card, as in the iPhone app: stop while Claude
-/// answers, send when there is text, voice mode otherwise.
+/// One button at the right of the message bar: stop while Claude answers, send
+/// when there is text, voice mode otherwise.
 - (void)updateActionButton {
-    NSString *symbol;
+    BOOL hasText = [self trimmedText].length > 0;
+    UIImage *image;
     UIColor *background;
     UIColor *tint;
     NSString *label;
     if (_streaming) {
         _actionName = @"stop";
-        symbol = @"stop.fill";
-        background = [NativeChrome chipColor];
-        tint = UIColor.labelColor;
+        image = SymbolImage(@"stop.fill", 13, UIImageSymbolWeightRegular);
+        background = UIColor.labelColor;
+        tint = UIColor.systemBackgroundColor;
         label = @"Stop";
-    } else if ([self trimmedText].length > 0 || !_voice) {
+    } else if (hasText || !_voice) {
         _actionName = @"send";
-        symbol = @"arrow.up";
-        background = [self trimmedText].length > 0 ? ThemedColor(0xD97757, 0xD97757) : [NativeChrome chipColor];
-        tint = [self trimmedText].length > 0 ? UIColor.whiteColor : UIColor.tertiaryLabelColor;
+        image = SymbolImage(@"arrow.up", 15, UIImageSymbolWeightBold);
+        background = hasText ? UIColor.tintColor : UIColor.tertiarySystemFillColor;
+        tint = hasText ? UIColor.whiteColor : UIColor.tertiaryLabelColor;
         label = @"Send";
     } else {
         _actionName = @"voice";
-        symbol = @"waveform";
-        background = UIColor.labelColor;
-        tint = UIColor.systemBackgroundColor;
+        image = SymbolImage(@"waveform", 19, UIImageSymbolWeightRegular);
+        background = UIColor.clearColor;
+        tint = UIColor.tintColor;
         label = @"Voice mode";
     }
-    [_actionButton setImage:SymbolImage(symbol, 17) forState:UIControlStateNormal];
+    [_actionButton setImage:image forState:UIControlStateNormal];
     _actionButton.backgroundColor = background;
     _actionButton.tintColor = tint;
     _actionButton.accessibilityLabel = label;
@@ -579,9 +578,9 @@ API_AVAILABLE(ios(15.0))
 
 - (void)textViewDidChange:(UITextView *)textView {
     _placeholder.hidden = textView.text.length > 0;
-    CGFloat width = textView.bounds.size.width > 0 ? textView.bounds.size.width : 300;
+    CGFloat width = textView.bounds.size.width > 0 ? textView.bounds.size.width : 260;
     CGFloat needed = [textView sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)].height;
-    _textHeight.constant = MIN(MAX(needed, 40), 140);
+    _textHeight.constant = MIN(MAX(needed, 36), 140);
     textView.scrollEnabled = needed > 140;
     [self updateActionButton];
 }
@@ -594,11 +593,13 @@ API_AVAILABLE(ios(15.0))
     _streaming = [state[@"streaming"] boolValue];
     _voice = [state[@"voice"] boolValue];
 
+    NSString *title = [state[@"title"] isKindOfClass:NSString.class] ? state[@"title"] : @"";
+    _titleLabel.text = title.length ? title : (inChat ? @"Chat" : @"New chat");
     _incognitoButton.hidden = inChat || ![state[@"incognito"] boolValue];
-    _pill.hidden = !inChat;
+    _newChatButton.hidden = !inChat;
+    _moreButton.hidden = !inChat;
     _moreButton.enabled = [state[@"more"] boolValue];
     _micButton.enabled = [state[@"dictate"] boolValue];
-    _placeholder.text = inChat ? @"Reply to Claude" : @"Chat with Claude";
     NSString *model = [state[@"model"] isKindOfClass:NSString.class] ? state[@"model"] : @"";
     NSString *effort = [state[@"effort"] isKindOfClass:NSString.class] ? state[@"effort"] : @"";
     [self setModel:model effort:effort];
@@ -817,6 +818,8 @@ API_AVAILABLE(ios(15.0))
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"appEvent"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"chrome"];
     [self installNativeChrome];
+    // Again now that the native bars exist: they take the same colours.
+    [self applyEdgeReport:[[NSUserDefaults standardUserDefaults] objectForKey:kEdgeColoursKey] animated:NO];
     if (@available(iOS 14.0, *)) {
         [self.webView.configuration.userContentController addScriptMessageHandlerWithReply:[[ModuleStore alloc] init]
                                                                               contentWorld:WKContentWorld.pageWorld
@@ -857,10 +860,11 @@ API_AVAILABLE(ios(15.0))
                    name:UISceneDidActivateNotification object:nil];
 
     self.terminations = [NSMutableArray array];
-    [self logEvent:[NSString stringWithFormat:@"app started (fast loading %@, page size %ld%%, tap fix %@)",
+    [self logEvent:[NSString stringWithFormat:@"app started (fast loading %@, page size %ld%%, tap fix %@, diagnostics %@)",
                     SettingBool(kFastLoadKey, YES) ? @"on" : @"off",
                     (long)lround(PageScaleSetting() * 100),
-                    SettingBool(kTapFixKey, YES) ? @"on" : @"off"]];
+                    SettingBool(kTapFixKey, YES) ? @"on" : @"off",
+                    SettingBool(kDiagnosticsKey, NO) ? @"on" : @"off"]];
 
     //[self showLoadingOverlay];
 
@@ -989,9 +993,8 @@ API_AVAILABLE(ios(15.0))
     }
 }
 
-- (void)startLoading {
-    [self.loadingOverlay setStage:@"Preparing compatibility layer" detail:nil];
-
+/// Everything injected into the page, in this order (see CLAUDE.md).
+- (void)installUserScripts {
     [self injectSettings];
     [self injectScriptNamed:@"app-tweaks"];
     [self injectIOSVersion];
@@ -1000,6 +1003,12 @@ API_AVAILABLE(ios(15.0))
     [self injectWorkerSource];
     [self injectScriptNamed:@"patch"];
     [PolyfillsLoader injectPolyfillsIntoController:_webView.configuration.userContentController];
+}
+
+- (void)startLoading {
+    [self.loadingOverlay setStage:@"Preparing compatibility layer" detail:nil];
+
+    [self installUserScripts];
 
     [self.loadingOverlay setProgress:0.05 animated:YES];
     [self.loadingOverlay setStage:@"Connecting to claude.ai" detail:nil];
@@ -1078,6 +1087,7 @@ API_AVAILABLE(ios(15.0))
         @"fastLoad": @(SettingBool(kFastLoadKey, YES)),
         @"tapFix": @(SettingBool(kTapFixKey, YES)),
         @"pageScale": @(PageScaleSetting()),
+        @"diagnostics": @(SettingBool(kDiagnosticsKey, NO)),
         // A BOOL, so it reaches the page as true/false (an int would arrive as 1).
         @"nativeChrome": @((BOOL)(self.nativeChrome != nil && SettingBool(kNativeChromeKey, YES))),
     };
@@ -1166,6 +1176,11 @@ API_AVAILABLE(ios(15.0))
         self.topFill.backgroundColor = top;
         self.bottomFill.backgroundColor = bottom;
         self.view.backgroundColor = top;
+        if (@available(iOS 15.0, *)) {
+            [(NativeChrome *)self.nativeChrome setTopColor:top
+                                               bottomColor:bottom
+                                                      dark:style == UIStatusBarStyleLightContent];
+        }
         if (style != self.pageStatusBarStyle) {
             self.pageStatusBarStyle = style;
             [self setNeedsStatusBarAppearanceUpdate];
@@ -1279,14 +1294,7 @@ API_AVAILABLE(ios(15.0))
 /// Settings that change what is injected into the page apply on the next load.
 - (void)applySettingAndReload {
     [self.webView.configuration.userContentController removeAllUserScripts];
-    [self injectSettings];
-    [self injectScriptNamed:@"app-tweaks"];
-    [self injectIOSVersion];
-    [self injectCustomCSS];
-    [self injectScriptNamed:@"legacy-transpiler"];
-    [self injectWorkerSource];
-    [self injectScriptNamed:@"patch"];
-    [PolyfillsLoader injectPolyfillsIntoController:_webView.configuration.userContentController];
+    [self installUserScripts];
     [self.webView reload];
 }
 
@@ -1343,6 +1351,14 @@ API_AVAILABLE(ios(15.0))
                                             handler:^(UIAlertAction *action) {
         [NSUserDefaults.standardUserDefaults setBool:!tapFix forKey:kTapFixKey];
         [weakSelf logEvent:[NSString stringWithFormat:@"tap fix turned %@", tapFix ? @"off" : @"on"]];
+        [weakSelf applySettingAndReload];
+    }]];
+    BOOL diagnostics = SettingBool(kDiagnosticsKey, NO);
+    [sheet addAction:[UIAlertAction actionWithTitle:diagnostics ? @"Diagnostics: on (turn off)" : @"Diagnostics: off (turn on)"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        [NSUserDefaults.standardUserDefaults setBool:!diagnostics forKey:kDiagnosticsKey];
+        [weakSelf logEvent:[NSString stringWithFormat:@"diagnostics turned %@", diagnostics ? @"off" : @"on"]];
         [weakSelf applySettingAndReload];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Clear event log"
@@ -2138,8 +2154,10 @@ API_AVAILABLE(ios(15.0))
 /// Turns the overlay into an error screen. Keeps the overlay up on purpose: a
 /// failed load leaves a blank web view behind, which tells the user nothing.
 - (void)showFailure:(NSString *)message details:(NSString *)details {
+    // The overlay is not shown at launch, so it is put up for the error: a failed
+    // load would otherwise leave a blank screen with nothing to tap.
     if (![self isLoadingOverlayVisible]) {
-        return;
+        [self showLoadingOverlay];
     }
 
     NSLog(@"[loading] failed: %@ (%@)", message, details);
@@ -2157,8 +2175,14 @@ API_AVAILABLE(ios(15.0))
         [strongSelf.loadingOverlay resetToLoading];
         [strongSelf.loadingOverlay setStage:@"Connecting to claude.ai" detail:nil];
         strongSelf.lastErrorMessage = nil;
+        strongSelf.errorCount = 0;
         [strongSelf resetLoadingProgress];
-        [strongSelf.webView reload];
+        // After a first load that failed there is no page to reload.
+        if (strongSelf.webView.URL != nil) {
+            [strongSelf.webView reload];
+        } else {
+            [strongSelf.webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"https://claude.ai"]]];
+        }
     } continueHandler:^{
         typeof(self) strongSelf = weakSelf;
         [strongSelf.loadingOverlay dismiss];
@@ -2172,6 +2196,12 @@ API_AVAILABLE(ios(15.0))
 }
 
 - (void)showFailureForError:(NSError *)error {
+    // Network failures only (offline, timeout, no DNS, TLS): other errors here
+    // are WebKit reporting a load it stopped itself, with the page still working.
+    if (![error.domain isEqualToString:NSURLErrorDomain]) {
+        return;
+    }
+    [self logEvent:[NSString stringWithFormat:@"page load failed: %@ (%ld)", error.localizedDescription, (long)error.code]];
     NSString *details = error.userInfo[@"WKJavaScriptExceptionMessage"] ?: error.localizedDescription;
     [self showFailure:@"Could not load claude.ai." details:details];
 }
@@ -2508,6 +2538,12 @@ API_AVAILABLE(ios(15.0))
         [self logEvent:[NSString stringWithFormat:@"page refused in-page modules (at %@); running them through the app", file]];
         return;
     }
+    if ([stage isEqualToString:@"error"] && [body[@"fatal"] boolValue]) {
+        NSString *fatalMessage = [body[@"message"] isKindOfClass:NSString.class] ? body[@"message"] : @"Unknown JavaScript error";
+        [self recordErrorMessage:fatalMessage];
+        [self showFailure:@"Claude could not be started on this iOS version." details:fatalMessage];
+        return;
+    }
     if (![self isLoadingOverlayVisible]) {
         return;
     }
@@ -2530,10 +2566,6 @@ API_AVAILABLE(ios(15.0))
     } else if ([stage isEqualToString:@"error"]) {
         NSString *jsMessage = [body[@"message"] isKindOfClass:NSString.class] ? body[@"message"] : @"Unknown JavaScript error";
         [self recordErrorMessage:jsMessage];
-        if ([body[@"fatal"] boolValue]) {
-            [self showFailure:@"Claude could not be started on this iOS version."
-                      details:jsMessage];
-        }
     }
 }
 

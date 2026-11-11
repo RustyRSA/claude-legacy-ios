@@ -8435,7 +8435,10 @@ var LegacyTranspiler = (() => {
     storeError: "",
     storeFiles: 0,
     storeBytes: 0,
-    storeInFlight: 0
+    storeInFlight: 0,
+    retries: 0,
+    loadFailures: 0,
+    loadError: ""
   };
   function nowMs() {
     return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
@@ -8664,8 +8667,18 @@ var LegacyTranspiler = (() => {
     }
     if (!out) {
       const t0 = nowMs();
-      const r = await fetch(src);
-      const code = await r.text();
+      let code;
+      try {
+        const r = await fetch(src);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        code = await r.text();
+      } catch (e) {
+        // A download that failed is worth another try; a module that cannot be
+        // transpiled is not.
+        const failure = new Error("download failed: " + String(e && e.message || e));
+        failure.retry = true;
+        throw failure;
+      }
       const t1 = nowMs();
       out = { code: transpile(src, code), fetchMs: t1 - t0, transpileMs: nowMs() - t1 };
       _stats.mainJobs += 1;
@@ -8675,6 +8688,19 @@ var LegacyTranspiler = (() => {
     storeInCache(src, out.code);
     warm(depsOf(out.code));
     return { code: out.code, how: job ? "worker" : "main" };
+  }
+  // A module the page waits for: a failed download is tried again after 1.5 s
+  // and 3 s (a weak connection, or the phone just back from sleep).
+  async function obtainWithRetry(src) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await obtainCode(src, false);
+      } catch (e) {
+        if (!(e && e.retry) || attempt >= 2) throw e;
+        _stats.retries += 1;
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 1500));
+      }
+    }
   }
   // ---- Background transpiling ----------------------------------------------
   var _workers = null;
@@ -8851,7 +8877,20 @@ var LegacyTranspiler = (() => {
         }
       }
       if (pending && result) _stats.prefetchUsed += 1;
-      if (!result) result = await obtainCode(src, false);
+      if (!result) {
+        try {
+          result = await obtainWithRetry(src);
+        } catch (e) {
+          // Not marked as loaded, so the next import of it starts over instead
+          // of waiting for ever.
+          loaded.delete(src);
+          _pending.delete(src);
+          _stats.loadFailures += 1;
+          _stats.loadError = src.split("/").pop() + ": " + String(e && e.message || e);
+          console.warn("[module failed]", _stats.loadError);
+          return;
+        }
+      }
       _pending.delete(src);
       rec.codeAt = nowMs();
       rec.how = result.how;

@@ -26,7 +26,7 @@ Injected as `WKUserScript`s at document start, in this order
 
 | Order | Script | Role |
 |---|---|---|
-| 1 | settings (inline) | `window.__appSettings` = `{fastLoad, tapFix, pageScale}` from the app menu |
+| 1 | settings (inline) | `window.__appSettings` = `{fastLoad, tapFix, pageScale, diagnostics, nativeChrome}` from the app menu |
 | 2 | `app-tweaks.js` | Ours. App feel, page size, tap fix, voice patches, WebSocket address fix, debug log and measurements |
 | 3 | iOS version (inline) | `window.iosVersion` |
 | 4 | custom CSS (document end) | Upstream: hides "Continue with Google" (Google blocks embedded web views) |
@@ -133,6 +133,29 @@ without sudo — use it if the phone only accepts Logan's SSH key).
 | `332633c` | 06 | Fast loading, launch timeline, sign-in protection, crash reload, bridge security, page size, tap fix |
 | `312d524` | 07a | Packs in CacheStorage (failed: quota full) |
 | (next) | 07 | Launch: app module store outside claude.ai's storage, batched reads (see Loader) |
+
+### Round 13 (11 Nov 2026) — review, generic native controls
+- Direction (Logan): no longer a copy of the Claude iPhone app. Standard iOS chat-app
+  controls (UIKit, system colours and tint, SF Symbols), designed without photo
+  references; `reference/` is no longer needed.
+- `NativeChrome` rebuilt: solid top bar (chat list button, chat title from the page
+  title, new chat and "..." in a chat, incognito on a new chat) and solid message bar
+  (model button, +, rounded text field that grows, dictate, one send / stop / voice
+  button). The bars take the page's edge colours and the page's light/dark, and cover
+  claude.ai's header and message box; the page still marks those invisible (12d logic,
+  now a second line of defence, not required).
+- Launch failures: the error screen is put up when a page load fails with a network
+  error or the page reports a fatal error (the overlay is not shown at launch, so this
+  used to be a blank screen); Reload loads claude.ai when there is no page to reload.
+- Loader: a failed module download is tried again after 1.5 s and 3 s; a module that
+  still fails is not marked loaded, so the next import starts over (`downloads retried`,
+  `modules not loaded` in the launch section of the log).
+- Advanced > Diagnostics (setting `Diagnostics`, default off): page-watching timing,
+  frames after taps, long timers, main-thread stalls, typing events and the IndexedDB
+  probe only run when on. Turn it on before asking Logan for a timing log.
+- One list of injected scripts (`-installUserScripts`).
+- Not built yet: awaiting CI build and device check. Next: native chat list fed from
+  claude.ai's own chat-list responses (cached on the phone), native menus.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
@@ -389,7 +412,8 @@ analytics of its own (claude.ai itself runs Datadog RUM).
 
 Route: rebuild in place, layered. claude.ai's web app stays the engine (runtime
 transpile + polyfills); the app owns the shell, loading, storage, diagnostics, and
-draws native iOS 16 controls (UIKit, SF Symbols, New York serif) that drive
+draws standard iOS 16 controls (UIKit, system colours, SF Symbols; generic chat-app
+design since round 13, not a copy of the Claude iPhone app) that drive
 claude.ai's controls underneath and fall back to claude.ai's own UI when a control is
 not found. Rejected: own client on claude.ai's private API (fragile, account risk),
 decompiling the official app (not decryptable on 16.3, terms and font licences),
@@ -401,7 +425,7 @@ Usability 3/4/8 · Performance 2/6/7-8 · Reliability 3/7/8 · Functional comple
 
 | Phase | Work | Status |
 |---|---|---|
-| A | Finish native controls stage 1: verify on device, keep the last message clear of the native box, keyboard stays after sending | In progress (12e: paste send + keyboard room built, awaiting device check) |
+| A | Native controls stage 1: verify on device, keep the last message clear of the native box, keyboard stays after sending | In progress (round 13 generic bars built on 12e, awaiting device check) |
 | B | Native menus: +, model, chat "..." as UIMenu filled from claude.ai's options | Next |
 | C | Native chat list: slide-in, cached on the phone (instant at launch), search | Planned |
 | D | Message styling: user bubble, serif replies, spacing, reply toolbar, scroll-down button | Planned |

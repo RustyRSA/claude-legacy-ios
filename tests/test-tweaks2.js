@@ -14,7 +14,7 @@ function make(url, settings) {
   const dom = new JSDOM(html, { runScripts: "outside-only", url, pretendToBeVisual: true });
   const w = dom.window;
   const events = [];
-  w.__appSettings = settings;
+  w.__appSettings = Object.assign({ diagnostics: true }, settings); // long timers and stalls are measured
   w.webkit = { messageHandlers: { appEvent: { postMessage: (m) => events.push(m) }, appearance: { postMessage() {} } } };
   w.document.elementsFromPoint = () => [w.document.body];
   w.visualViewport = { width: 393, scale: 1 };

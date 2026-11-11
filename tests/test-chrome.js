@@ -46,6 +46,7 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(state.ready, true, "ready: " + JSON.stringify(state));
   assert.strictEqual(state.page, "new");
   assert.strictEqual(state.model, "Opus 5.5");
+  assert.strictEqual(state.title, "", "no title on a new chat");
   assert.strictEqual(state.effort, "Extra");
   assert.strictEqual(state.voice, true);
   assert.strictEqual(state.incognito, true);

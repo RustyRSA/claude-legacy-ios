@@ -22,6 +22,11 @@
   var settings = window.__appSettings || {};
   var TAP_FIX = settings.tapFix !== false;
   var PAGE_SCALE = Math.min(1.25, Math.max(1, Number(settings.pageScale) || 1));
+  // Advanced > Diagnostics. Off: the measurements that cost time on every launch
+  // and tap are skipped (page-watching work, frames after taps, long timers,
+  // main-thread stalls, typing events, the IndexedDB probe). Errors, sign-outs,
+  // API timings, taps without a click and the voice log are always kept.
+  var DIAGNOSTICS = !!settings.diagnostics;
 
   // ---------------------------------------------------------------------------
   // Debug log
@@ -149,6 +154,7 @@
       "voice support check: " + patchStatus.supportCheck,
       "voice PCM mode: " + patchStatus.pcmMode,
       "settings: page size " + Math.round(PAGE_SCALE * 100) + "%, tap fix " + (TAP_FIX ? "on" : "off") +
+        ", diagnostics " + (DIAGNOSTICS ? "on" : "off (turn on in Advanced for timings of taps, frames and stalls)") +
         ", loading " + (window.__appLoader ? window.__appLoader.mode +
           (window.__appLoader.mode === "fast" ? (window.__appLoader.inPage() ? " (in page)" : " (through the app)") : "") : "?")
     ].concat(chromeSummary(), launchSummary(), chatSummary(), tapSummary(), responsivenessSummary(), screenInventory(), ["----"]);
@@ -540,7 +546,7 @@
 
   // Times every MutationObserver callback. Observers created before claude.ai's
   // own code starts belong to the compatibility polyfills; later ones to the app.
-  if (typeof NativeObserver === "function" && typeof Proxy === "function" && window.performance) {
+  if (DIAGNOSTICS && typeof NativeObserver === "function" && typeof Proxy === "function" && window.performance) {
     window.MutationObserver = new Proxy(NativeObserver, {
       construct: function (Target, args, newTarget) {
         var callback = args[0];
@@ -606,6 +612,7 @@
 
   function round(n) { return Math.round(n); }
   function responsivenessSummary() {
+    if (!DIAGNOSTICS) return ["IndexedDB commit() calls skipped: " + idbCommits];
     var sorted = tapReactions.slice().sort(function (a, b) { return a - b; });
     var median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
     var worst = sorted.length ? sorted[sorted.length - 1] : 0;
@@ -906,7 +913,7 @@
   }
   // Timers of 2 s or more set during the first 40 s: a start-up that waits for a
   // timeout (rather than working) shows up here.
-  window.setTimeout = function (fn, delay) {
+  if (DIAGNOSTICS) window.setTimeout = function (fn, delay) {
     var ms = Number(delay) || 0;
     if (ms >= 2000 && typeof fn === "function" && performance.now() < 40000 && longTimers.length < 30) {
       var entry = { ms: ms, at: performance.now(), by: callerOf(new Error().stack), firedAt: 0 };
@@ -924,7 +931,7 @@
 
   // The page cannot run its timers while the main thread is busy; gaps in a
   // 100 ms heartbeat show how long it was blocked, and when.
-  (function heartbeat() {
+  if (DIAGNOSTICS) (function heartbeat() {
     var last = performance.now();
     var beat = setInterval(function () {
       var now = performance.now();
@@ -1017,7 +1024,9 @@
       "  transpiling " + Math.round(s.transpileMs) + " ms, downloading " + Math.round(s.fetchMs) + " ms, cache reads " +
         Math.round(s.readMs) + " ms, workers " + s.workers + (s.workerError ? " (" + s.workerError + ")" : "") +
         ", cache saves failed " + s.putFailures + (s.putError ? " (" + s.putError + ")" : "") +
-        ", old entries removed " + s.pruned + ", old caches removed " + s.cachesRemoved
+        ", old entries removed " + s.pruned + ", old caches removed " + s.cachesRemoved +
+        ", downloads retried " + (s.retries || 0) + ", modules not loaded " + (s.loadFailures || 0) +
+        (s.loadError ? " (" + s.loadError + ")" : "")
     ];
     var loader = window.__appLoader;
     if (loader && loader.runTimes) {
@@ -1151,9 +1160,9 @@
   // ---------------------------------------------------------------------------
   // Native controls (round 12)
   // ---------------------------------------------------------------------------
-  // The app draws its own top buttons and message box like the iPhone app's
-  // (ViewController.m, NativeChrome). claude.ai's header and message box are made
-  // invisible but stay in place: the app presses their buttons and puts text into
+  // The app draws a standard iOS top bar and message bar (ViewController.m,
+  // NativeChrome). Its bars are solid and cover claude.ai's header and message
+  // box, which are also made invisible but stay in place: the app presses their buttons and puts text into
   // claude.ai's box, so claude.ai still does the work, and its menus open where the
   // app's buttons are. Controls are found by their labels; when one is missing,
   // nothing is hidden (ready: false) and the app shows claude.ai's own controls.
@@ -1266,6 +1275,12 @@
     }
     return null;
   }
+  // The chat's name for the app's top bar, from the page title ("Name - Claude").
+  // Shown only; never written to the debug log.
+  function chatTitle() {
+    var title = String(document.title || "").replace(/\s*[-\u2013|]\s*Claude\s*$/, "").trim();
+    return title === "Claude" ? "" : title.slice(0, 80);
+  }
   function pageKind() {
     var path = location.pathname;
     if (path === "/" || path === "/new") return "new";
@@ -1354,6 +1369,7 @@
       ready: ready,
       why: kind === "other" ? "page " + location.pathname.split("/")[1] : missing.length ? "missing " + missing.join(", ") : "",
       page: kind,
+      title: kind === "chat" ? chatTitle() : "",
       sidebarOpen: sidebar,
       streaming: !!(c.composer && stopButton(c.composer)),
       model: words.join(" "),
@@ -1569,7 +1585,7 @@
       // times while the animation runs; the app cross-fades between reports.
       var SAMPLE_TIMES = [60, 140, 240, 380, 560];
       document.addEventListener("touchend", function () {
-        measureTap();
+        if (DIAGNOSTICS) measureTap();
         for (var i = 0; i < SAMPLE_TIMES.length; i++) setTimeout(reportAppearance, SAMPLE_TIMES[i]);
       }, { passive: true, capture: true });
     } catch (e) {
@@ -1577,10 +1593,12 @@
     }
     // Page navigations inside the app can change the header colour too.
     setInterval(reportAppearance, 2000);
-    ["beforeinput", "input", "compositionstart", "compositionend", "keydown"].forEach(function (type) {
-      document.addEventListener(type, watchComposer, true);
-    });
-    nativeSetTimeout(probeIndexedDB, 3000);
+    if (DIAGNOSTICS) {
+      ["beforeinput", "input", "compositionstart", "compositionend", "keydown"].forEach(function (type) {
+        document.addEventListener(type, watchComposer, true);
+      });
+      nativeSetTimeout(probeIndexedDB, 3000);
+    }
     // Chat-opening timings need to know when the screen last changed.
     try {
       if (document.body && typeof NativeObserver === "function") {

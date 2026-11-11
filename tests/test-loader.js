@@ -69,13 +69,14 @@ function makeStore(fails) {
   };
 }
 
-function run({ fast, caches, manifest, store, migrate, workers = true, workerBreaks = false }) {
+function run({ fast, caches, manifest, store, migrate, workers = true, workerBreaks = false, failDownloads = 0, wait = 300 }) {
   const order = [];
   const fetched = [];
   const blobs = new Map();
   const fetchImpl = async (url) => {
     fetched.push(url.split("/").pop());
     const name = url.replace(BASE + "/", "");
+    if (name === "c.js" && failDownloads-- > 0) throw new TypeError("Load failed");
     if (!(name in SOURCES)) return new Response("", { status: 404 });
     return new Response(SOURCES[name]);
   };
@@ -106,7 +107,7 @@ function run({ fast, caches, manifest, store, migrate, workers = true, workerBre
     runScript: (code) => vm.runInContext(code, ctx),
   });
   LT.loadCode(BASE + "/index.js");
-  return new Promise((resolve) => setTimeout(() => resolve({ LT, order, fetched, workersMade }), 300));
+  return new Promise((resolve) => setTimeout(() => resolve({ LT, order, fetched, workersMade }), wait));
 }
 
 (async () => {
@@ -221,6 +222,26 @@ function run({ fast, caches, manifest, store, migrate, workers = true, workerBre
   const plain = makeCaches();
   await run({ fast: true, caches: plain, workers: false });
   assert.strictEqual(plain.stores.get("transpiled-fast-v0.1.24-1").get(BASE + "/a.js"), fastStore.get(BASE + "/a.js"));
+
+  // A download that fails (the head start, then the first real try) is tried
+  // again; the page still starts, in order.
+  const flaky = await run({ fast: true, caches: makeCaches(), workers: false, failDownloads: 2, wait: 2200 });
+  assert.deepStrictEqual(flaky.order, EXPECT, "order after a retried download");
+  const sFlaky = flaky.LT.stats().stats;
+  assert.strictEqual(sFlaky.retries, 1, "one retry");
+  assert.strictEqual(sFlaky.loadFailures, 0);
+
+  // A download that keeps failing: given up after three tries, and the module
+  // is not marked as loaded, so a later import starts over.
+  const dead = await run({ fast: true, caches: makeCaches(), workers: false, failDownloads: 4, wait: 5200 });
+  const sDead = dead.LT.stats().stats;
+  assert.strictEqual(sDead.retries, 2);
+  assert.strictEqual(sDead.loadFailures, 1);
+  assert.ok(/^c.js: download failed/.test(sDead.loadError), sDead.loadError);
+  assert.deepStrictEqual(dead.order, [], "nothing ran without c.js");
+  dead.LT.importModule("./c.js");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepStrictEqual(dead.order, EXPECT, "started over on the next import");
 
   console.log("LOADER PASS");
   process.exit(0);
