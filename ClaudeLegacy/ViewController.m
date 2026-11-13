@@ -744,7 +744,7 @@ static const CGFloat kMessageBarHeight = 80;
     }
     NSUInteger token = ++_coverToken;
     // A moment for the page to draw with claude.ai's controls already hidden.
-    [UIView animateWithDuration:0.2 delay:0.1 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+    [UIView animateWithDuration:0.2 delay:0.3 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
         self->_curtain.alpha = 0;
     } completion:^(BOOL finished) {
         if (self->_coverToken == token) {

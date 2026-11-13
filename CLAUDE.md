@@ -359,6 +359,20 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   moments in a running page. The per-element hiding (rounds 16–19) stays underneath.
 - Dictation: what claude.ai has written so far (`dictationText`, last 80 characters)
   shows in the native field while it listens.
+- Installed 14 Nov (`0fe6534`). Logan: spinner good, but claude.ai's controls still
+  show for ~50 ms when the cover lifts. He asked whether this design is the best one.
+- 20b: the hidden / collapsed / early rules now carry `transition:none` and
+  `animation:none`. Likely cause of the flash in every round since 14: claude.ai's
+  controls have CSS transitions, so `opacity:0` faded them out instead of hiding them
+  at once (not confirmed on device yet). Cover lifts 0.3 s (was 0.1 s) after "in use".
+- Design question (answered 14 Nov): web app as engine + native shell stays the only
+  workable base (no official app for 16.3, a client on the private API was rejected for
+  account risk and scope). The cost is in the seams: each native control that replaces
+  a claude.ai control has to find it, hide it and follow its states, and claude.ai
+  changes often. Rule from here: go native where one control maps to one claude.ai
+  control (bars, send, model, chat list, dictation); for claude.ai's own complex
+  screens (voice mode, the + menu's pickers) prefer stepping aside over re-skinning,
+  unless Logan asks for that screen specifically.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,

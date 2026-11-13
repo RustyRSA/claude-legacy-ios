@@ -1338,7 +1338,8 @@
       var early = earlySelectors();
       if (early.length && document.documentElement) {
         earlyStyle = document.createElement("style");
-        earlyStyle.textContent = early.join(",") + "{opacity:0!important;pointer-events:none!important}";
+        earlyStyle.textContent = early.join(",") +
+          "{opacity:0!important;pointer-events:none!important;transition:none!important;animation:none!important}";
         document.documentElement.appendChild(earlyStyle);
         setTimeout(endEarlyStyle, 6000);
       }
@@ -2169,7 +2170,11 @@
 
   function startChrome() {
     var style = document.createElement("style");
-    style.textContent = "html.app-native-chrome [data-app-hidden]{opacity:0!important;pointer-events:none!important}" +
+    // transition / animation off: claude.ai animates its controls, so a hidden
+    // mark would otherwise fade the control out over a fraction of a second
+    // instead of hiding it at once (the flash that outlived rounds 14–20).
+    style.textContent = "html.app-native-chrome [data-app-hidden]{opacity:0!important;pointer-events:none!important;" +
+      "transition:none!important;animation:none!important}" +
       "html.app-native-chrome [data-app-collapsed]{height:0!important;min-height:0!important;max-height:0!important;" +
       "overflow:hidden!important;padding-top:0!important;padding-bottom:0!important;margin-top:0!important;" +
       "margin-bottom:0!important;border-width:0!important}" +
