@@ -909,31 +909,34 @@
   // links. Sent only when it changed. If claude.ai changes that layout the
   // app's list simply has no sections.
   var groupsSent = "";
+  // What a section can hold: chats, artifacts, code sessions, projects.
+  var ITEM_PATH = /^\/(chat|artifact|code|project)\/[\w\-\/]{1,120}$/;
   function chatGroupsFromPage() {
     var aside = find("aside");
     if (!aside) return;
-    var nodes = aside.querySelectorAll('button, a[href^="/chat/"]');
+    var nodes = aside.querySelectorAll("button, a[href]");
     var groups = [];
-    var heading = "";
     var current = null;
     var count = 0;
     for (var i = 0; i < nodes.length && count < 300 && groups.length < 40; i++) {
       var el = nodes[i];
       var text = String(el.textContent || "").trim();
       if (el.tagName === "A") {
-        var id = String(el.getAttribute("href")).slice(6).split(/[?#/]/)[0];
-        if (!CHAT_ID.test(id)) continue;
+        var path = String(el.getAttribute("href")).split(/[?#]/)[0];
+        if (!ITEM_PATH.test(path)) continue;
         if (!current) {
-          current = { name: heading.slice(0, 60), chats: [] };
+          current = { name: "", chats: [] };
           groups.push(current);
         }
-        current.chats.push({ id: id, name: text.slice(0, 200) });
+        current.chats.push({ path: path, name: text.slice(0, 200) });
         count++;
       } else if (text && text.length <= 60 && !el.getAttribute("aria-label") && !el.getAttribute("data-testid")) {
         var height = el.getBoundingClientRect().height;
         if (height > 0 && height < 31) {
-          heading = text;
-          current = null;
+          // A section claude.ai shows closed has nothing under it here: the
+          // app then keeps what it last knew for that name.
+          current = { name: text.slice(0, 60), chats: [] };
+          groups.push(current);
         }
       }
     }
@@ -941,7 +944,7 @@
     var key = JSON.stringify(groups);
     if (key === groupsSent) return;
     groupsSent = key;
-    record("chrome", "chat list: " + groups.length + " sections with " + count + " chats from the sidebar");
+    record("chrome", "chat list: " + groups.length + " sections with " + count + " items from the sidebar");
     try {
       window.webkit.messageHandlers.chatList.postMessage({ groups: groups });
     } catch (e) {}
@@ -1517,19 +1520,54 @@
   // button is back and its box is empty again (dictated text is sent or cleared
   // there), or when it never started within 5 s.
   var takeover = null;
+  var dictated = ""; // words to hand to the app's message bar with the next report
   function startTakeover(kind) {
-    takeover = { kind: kind, since: performance.now(), path: location.pathname, busy: false };
+    takeover = { kind: kind, since: performance.now(), path: location.pathname, busy: false, idleSince: 0 };
+  }
+  // Empties claude.ai's message box (after its dictated words went to the app).
+  function clearEditor(editor) {
+    var mode = editor.getAttribute("inputmode");
+    editor.setAttribute("inputmode", "none");
+    try {
+      editor.focus();
+      var range = document.createRange();
+      range.selectNodeContents(editor);
+      var selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand("delete", false, null);
+      editor.blur();
+    } catch (e) {}
+    if (mode === null) editor.removeAttribute("inputmode");
+    else editor.setAttribute("inputmode", mode);
   }
   function inTakeover(c) {
     if (!takeover) return false;
-    var idle = !!find(takeover.kind === "voice" ? 'button[aria-label="Use voice mode"]' : 'button[aria-label="Dictate"]');
-    if (!idle) takeover.busy = true;
-    var empty = !c.editor || !c.editor.textContent.replace(/\s/g, "");
-    var age = performance.now() - takeover.since;
+    var now = performance.now();
+    var voice = takeover.kind === "voice";
+    // Running: claude.ai's button is gone, or a voice / dictation connection is open.
+    var live = openSockets.some(function (ws) { return ws.readyState <= 1; });
+    var idle = !live && !!find(voice ? 'button[aria-label="Use voice mode"]' : 'button[aria-label="Dictate"]');
+    if (!idle) {
+      takeover.busy = true;
+      takeover.idleSince = 0;
+    } else if (!takeover.idleSince) {
+      takeover.idleSince = now;
+    }
+    var text = c.editor ? String(c.editor.textContent || "") : "";
+    var empty = !text.replace(/\s/g, "");
+    var age = now - takeover.since;
+    var settled = idle && !!c.editor && !!c.send && now - takeover.idleSince > 600;
     var over = location.pathname !== takeover.path ||
-      (idle && empty && !!c.editor && !!c.send && age > (takeover.busy ? 800 : 5000));
+      (settled && (takeover.busy ? (!voice || empty) : (empty && age > 5000)));
     if (!over) return true;
-    record("chrome", takeover.kind + " ended after " + Math.round(age / 1000) + " s" + (takeover.busy ? "" : " (never seen starting)"));
+    if (!voice && takeover.busy && !empty && c.editor) {
+      // The dictated words move to the app's message bar.
+      dictated = text.trim().slice(0, 20000);
+      clearEditor(c.editor);
+    }
+    record("chrome", takeover.kind + " ended after " + Math.round(age / 1000) + " s" +
+      (takeover.busy ? "" : " (never seen starting)") + (dictated ? ", " + dictated.length + " characters to the app" : ""));
     takeover = null;
     return false;
   }
@@ -1572,6 +1610,7 @@
       viewWidth: window.innerWidth || 0,
       sidebarOpen: sidebar,
       composerShown: own,
+      dictated: dictated,
       streaming: !!(c.composer && stopButton(c.composer)),
       model: words.join(" "),
       effort: effort,
@@ -1586,6 +1625,146 @@
     try {
       window.webkit.messageHandlers.chrome.postMessage(chromeState);
     } catch (e) {}
+    if (dictated) {
+      // Handed over once; never kept or logged.
+      dictated = "";
+      chromeState.dictated = "";
+      chromeSent = JSON.stringify(chromeState);
+    }
+  }
+
+  // ---- claude.ai's menus as native menus -------------------------------------
+  // The app's model button shows a native menu. Its entries are read from
+  // claude.ai's own menu: that menu is opened unseen, its items are read, and
+  // it is closed again; picking an entry opens it unseen once more and presses
+  // the item. When no items are found, or the menu does not close, claude.ai's
+  // menu is simply shown as before.
+  var MENU_BUTTONS = { model: 'button[aria-label^="Model:"]' };
+  var MENU_ITEMS = '[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"]';
+  var quietTimer = null;
+  function quietMenus(on) {
+    document.documentElement.classList.toggle("app-menu-quiet", on);
+    clearTimeout(quietTimer);
+    // Never left unseen: whatever happens, menus are visible again after 2.5 s.
+    if (on) quietTimer = nativeSetTimeout(function () { quietMenus(false); }, 2500);
+  }
+  function openMenus() {
+    var out = [];
+    var menus = document.querySelectorAll('[role="menu"],[role="listbox"]');
+    for (var i = 0; i < menus.length; i++) {
+      if (menus[i].querySelector(MENU_ITEMS)) out.push(menus[i]);
+    }
+    return out;
+  }
+  function waitFor(test, ms) {
+    return new Promise(function (resolve) {
+      var started = performance.now();
+      var check = function () {
+        var value = test();
+        if (value) resolve(value);
+        else if (performance.now() - started >= ms) resolve(null);
+        else nativeSetTimeout(check, 30);
+      };
+      check();
+    });
+  }
+  function menuItemInfo(el, index) {
+    var label = el.getAttribute("aria-label") || "";
+    var lines = String(el.innerText || el.textContent || "").split("\n")
+      .map(function (line) { return line.trim(); }).filter(Boolean);
+    return {
+      index: index,
+      title: String(label || lines[0] || "").slice(0, 80),
+      subtitle: label ? "" : lines.slice(1).join(" ").slice(0, 120),
+      checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("data-state") === "checked",
+      disabled: el.getAttribute("aria-disabled") === "true" || el.hasAttribute("data-disabled") || !!el.disabled,
+      sub: el.hasAttribute("aria-haspopup")
+    };
+  }
+  function menuClosed() { return openMenus().length === 0; }
+  function closeMenus(button) {
+    var target = document.activeElement || document.body;
+    ["keydown", "keyup"].forEach(function (type) {
+      try {
+        target.dispatchEvent(new KeyboardEvent(type, { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+      } catch (e) {}
+    });
+    return waitFor(menuClosed, 300).then(function (closed) {
+      if (closed) return true;
+      button.click();
+      return waitFor(menuClosed, 300).then(function (again) { return !!again; });
+    });
+  }
+  function showMenu(button) {
+    button.click();
+    return waitFor(function () {
+      var menus = openMenus();
+      return menus.length ? menus[menus.length - 1] : null;
+    }, 800);
+  }
+  // -> JSON list of {index, title, subtitle, checked, disabled, sub}; "[]" when
+  // there is nothing to show natively; "open" when claude.ai's menu stayed open.
+  function menuItems(name) {
+    var button = find(MENU_BUTTONS[name] || "none");
+    if (!button || !menuClosed()) return Promise.resolve("[]");
+    quietMenus(true);
+    return showMenu(button).then(function (menu) {
+      if (!menu) {
+        quietMenus(false);
+        record("chrome", name + " menu: no menu found after pressing claude.ai's button");
+        return menuClosed() ? "[]" : "open";
+      }
+      var roles = {};
+      var items = [];
+      var els = menu.querySelectorAll(MENU_ITEMS);
+      for (var i = 0; i < els.length && items.length < 30; i++) {
+        var role = els[i].getAttribute("role");
+        roles[role] = (roles[role] || 0) + 1;
+        var info = menuItemInfo(els[i], i);
+        if (info.title) items.push(info);
+      }
+      record("chrome", name + " menu: " + items.length + " items (" + Object.keys(roles).map(function (r) {
+        return roles[r] + " " + r;
+      }).join(", ") + ")");
+      return closeMenus(button).then(function (closed) {
+        quietMenus(false);
+        if (!closed) record("chrome", name + " menu: claude.ai's menu did not close, shown instead");
+        return closed ? JSON.stringify(items) : "open";
+      });
+    });
+  }
+  // arg: "name\nindex\ntitle". Presses that item in claude.ai's menu.
+  function menuPick(arg) {
+    var parts = arg.split("\n");
+    var name = parts[0], index = Number(parts[1]), title = parts.slice(2).join("\n");
+    var button = find(MENU_BUTTONS[name] || "none");
+    if (!button) return Promise.resolve("missing " + name + " button");
+    quietMenus(true);
+    return (menuClosed() ? showMenu(button) : Promise.resolve(openMenus().pop())).then(function (menu) {
+      var els = menu ? menu.querySelectorAll(MENU_ITEMS) : [];
+      var el = els[index] && menuItemInfo(els[index], index).title === title ? els[index] : null;
+      for (var i = 0; !el && i < els.length; i++) {
+        if (menuItemInfo(els[i], i).title === title) el = els[i];
+      }
+      if (!el) {
+        quietMenus(false); // claude.ai's menu is left open to pick from
+        record("chrome", name + " menu: picked item not found");
+        return "item not found";
+      }
+      var sub = el.hasAttribute("aria-haspopup");
+      el.click();
+      if (sub) {
+        quietMenus(false); // its submenu is claude.ai's own
+        return "ok";
+      }
+      return waitFor(menuClosed, 400).then(function (closed) {
+        return closed ? true : closeMenus(button);
+      }).then(function () {
+        quietMenus(false);
+        nativeSetTimeout(updateChrome, 50);
+        return "ok";
+      });
+    });
   }
 
   function press(el, label) {
@@ -1712,16 +1891,19 @@
           else location.assign("/new");
           result = "ok";
           break;
-        case "openChat":
-          // From the app's chat list: claude.ai's own link to that chat when it
-          // has one (no reload), else the chat's address.
-          var chatId = String(arg || "");
-          if (!CHAT_ID.test(chatId)) { result = "not a chat id"; break; }
-          var chatLink = find('a[href="/chat/' + chatId + '"]');
-          if (chatLink) chatLink.click();
-          else location.assign("/chat/" + chatId);
+        case "openPath":
+          // From the app's chat list: claude.ai's own link to that chat (or
+          // artifact, code session, project) when it has one (no reload), else
+          // its address.
+          var itemPath = String(arg || "");
+          if (!ITEM_PATH.test(itemPath)) { result = "not a chat address"; break; }
+          var itemLink = find('a[href="' + itemPath + '"]');
+          if (itemLink) itemLink.click();
+          else location.assign(itemPath);
           result = "ok";
           break;
+        case "menuItems": return menuItems(String(arg || ""));
+        case "menuPick": return menuPick(String(arg || ""));
         case "more": result = press(c.more, "chat menu"); break;
         case "plus": result = press(find('button[aria-label="Add files, connectors, and more"]'), "+ button"); break;
         case "model": result = press(find('button[aria-label^="Model:"]'), "model button"); break;
@@ -1750,7 +1932,8 @@
     style.textContent = "html.app-native-chrome [data-app-hidden]{opacity:0!important;pointer-events:none!important}" +
       "html.app-native-chrome [data-app-collapsed]{height:0!important;min-height:0!important;max-height:0!important;" +
       "overflow:hidden!important;padding-top:0!important;padding-bottom:0!important;margin-top:0!important;" +
-      "margin-bottom:0!important;border-width:0!important}";
+      "margin-bottom:0!important;border-width:0!important}" +
+      'html.app-menu-quiet [role="menu"],html.app-menu-quiet [role="listbox"]{opacity:0!important}';
     (document.head || document.documentElement).appendChild(style);
     var pending = null;
     var schedule = function () {

@@ -222,7 +222,34 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   claude.ai's list items, to build sections from the data instead, later).
 - Chat list rows: a chat / New chat starts at once while the sheet slides away; the two
   menu rows close the sheet without animation first.
-- Still claude.ai's own UI: + menu, model menu, chat "..." menu (Phase B, next).
+- Installed 13 Nov (`1e54f7d`). Logan: no flash, no clipping of claude.ai's menus,
+  sections present. Open: "claude.ai's message box is not shown but its presence is
+  still there" and the start page's greeting (icon left of the text) off-centre: not
+  understood yet, screenshots asked for. Log: list item fields are created_at,
+  is_starred, project, name, summary, updated_at, uuid, … (no field for his own groups,
+  so sections stay read from the sidebar); "Pinned" holds a code session
+  (`/code/project/…`) and an artifact besides chats; dictation's button does not
+  change while it runs (takeover ended after 5 s with the socket still open).
+
+### Round 15 (13 Nov 2026) — model menu, dictation, chat list sections
+- Native model menu: the model button has a `UIMenu` with an uncached
+  `UIDeferredMenuElement`. Page `menuItems("model")`: claude.ai's menu is opened unseen
+  (`html.app-menu-quiet` makes `[role=menu]`/`[role=listbox]` transparent, 2.5 s limit),
+  its `[role^=menuitem]`/`[role=option]` items read (title, subtitle, checked,
+  disabled, submenu), closed with Escape (or a second press of the button); `menuPick`
+  opens it unseen again and presses the item (an item with a submenu leaves claude.ai's
+  submenu showing). Nothing found -> one entry "Show Claude's menu"; menu will not close
+  -> claude.ai's menu shown. Written without seeing claude.ai's menu markup: the log
+  line `model menu: N items (roles)` says what was found. + and "..." menus not yet.
+- Dictation: running = claude.ai's Dictate button gone or a voice/dictation socket
+  open; when it has been idle 0.6 s the dictated text moves to the native message bar
+  (`dictated` in the state, once; never logged) and claude.ai's box is emptied.
+  Voice mode still shows claude.ai's own voice screen (native skin needs its markup).
+- Chat list: sections hold any `/chat/`, `/artifact/`, `/code/`, `/project/` link
+  (`{path, name}`, `openPath` action, path checked on both sides); a section claude.ai
+  shows closed keeps the items last seen; section headings are buttons that close /
+  open the section (`ChatListCollapsedSections`); symbols this iOS has no glyph for
+  (newer emoji) are left out of names (`ReadableText`, CoreText last-resort check).
 - Not checked on device yet.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1

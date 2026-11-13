@@ -321,6 +321,11 @@ API_AVAILABLE(ios(15.0))
 /// At launch, when the controls were in use last time: shown at once, with the
 /// buttons off until the page reports.
 - (void)showWhileLoading;
+/// The model button's native menu: asks for claude.ai's menu items
+/// ({index, title, subtitle, checked, disabled, sub}; none = show claude.ai's
+/// own menu, nil = it is already showing), and reports the item picked.
+@property (nonatomic, copy) void (^onMenuItems)(NSString *menu, void (^completion)(NSArray<NSDictionary *> * _Nullable items));
+@property (nonatomic, copy) void (^onMenuPick)(NSString *menu, NSDictionary *item);
 /// How much of the screen's bottom the message bar takes (points above the safe
 /// area's bottom edge; 0 when it is not shown): the page ends there.
 @property (nonatomic, copy) void (^onBarInset)(CGFloat inset);
@@ -466,6 +471,18 @@ API_AVAILABLE(ios(15.0))
     _modelButton.translatesAutoresizingMaskIntoConstraints = NO;
     _modelButton.accessibilityLabel = @"Model";
     [_modelButton addTarget:self action:@selector(modelTapped) forControlEvents:UIControlEventTouchUpInside];
+    // A native menu, filled from claude.ai's model menu each time it opens.
+    __weak typeof(self) weakSelf = self;
+    UIDeferredMenuElement *models = [UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            completion(@[]);
+            return;
+        }
+        [strongSelf menuElementsFor:@"model" completion:completion];
+    }];
+    _modelButton.menu = [UIMenu menuWithChildren:@[models]];
+    _modelButton.showsMenuAsPrimaryAction = YES;
     [self setModel:@"" effort:@""];
 
     _plusButton = [self barButton:@"plus" action:@selector(plusTapped) label:@"Add files"];
@@ -543,6 +560,52 @@ API_AVAILABLE(ios(15.0))
     // Not the chat list button: the list works while the page still loads.
     _buttons = @[_incognitoButton, _newChatButton, _moreButton, _modelButton, _plusButton, _micButton, _actionButton];
     [self updateActionButton];
+}
+
+/// claude.ai's menu items as native menu entries. Without items, one entry
+/// that shows claude.ai's own menu.
+- (void)menuElementsFor:(NSString *)menu completion:(void (^)(NSArray<UIMenuElement *> *))completion {
+    if (self.onMenuItems == nil) {
+        completion(@[]);
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    self.onMenuItems(menu, ^(NSArray<NSDictionary *> *items) {
+        if (items == nil) {
+            completion(@[]); // claude.ai's own menu is on screen
+            return;
+        }
+        NSMutableArray<UIMenuElement *> *elements = [NSMutableArray array];
+        for (NSDictionary *item in items) {
+            NSString *title = [item[@"title"] isKindOfClass:NSString.class] ? item[@"title"] : @"";
+            if (title.length == 0) {
+                continue;
+            }
+            UIAction *action = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__kindof UIAction *chosen) {
+                if (weakSelf.onMenuPick) {
+                    weakSelf.onMenuPick(menu, item);
+                }
+            }];
+            NSString *subtitle = [item[@"subtitle"] isKindOfClass:NSString.class] ? item[@"subtitle"] : @"";
+            if (subtitle.length) {
+                action.subtitle = subtitle;
+            }
+            if ([item[@"sub"] boolValue]) {
+                action.image = [UIImage systemImageNamed:@"chevron.right"];
+            }
+            action.state = [item[@"checked"] boolValue] ? UIMenuElementStateOn : UIMenuElementStateOff;
+            if ([item[@"disabled"] boolValue]) {
+                action.attributes = UIMenuElementAttributesDisabled;
+            }
+            [elements addObject:action];
+        }
+        if (elements.count == 0) {
+            [elements addObject:[UIAction actionWithTitle:@"Show Claude's menu" image:nil identifier:nil handler:^(__kindof UIAction *chosen) {
+                [weakSelf fire:menu argument:nil];
+            }]];
+        }
+        completion(elements);
+    });
 }
 
 /// The message bar with one line of text: 4 + model row 30 + 2 + text 36 + 8.
@@ -735,6 +798,15 @@ static const CGFloat kMessageBarHeight = 80;
     NSString *effort = [state[@"effort"] isKindOfClass:NSString.class] ? state[@"effort"] : @"";
     [self setModel:model effort:effort];
     [self updateActionButton];
+
+    // Words dictated in claude.ai's box arrive here, to be sent from this bar.
+    NSString *dictated = [state[@"dictated"] isKindOfClass:NSString.class] ? state[@"dictated"] : @"";
+    if (dictated.length) {
+        NSString *current = _textView.text ?: @"";
+        BOOL needsSpace = current.length > 0 && ![current hasSuffix:@" "] && ![current hasSuffix:@"\n"];
+        _textView.text = [NSString stringWithFormat:@"%@%@%@", current, needsSpace ? @" " : @"", dictated];
+        [self textViewDidChange:_textView];
+    }
 
     // Voice mode and dictation run in claude.ai's own message box: the app's
     // message bar steps aside for it, the top bar stays.
@@ -1067,6 +1139,34 @@ static const CGFloat kMessageBarHeight = 80;
         chrome.onBarInset = ^(CGFloat inset) {
             weakSelf.webBottomConstraint.constant = -inset;
         };
+        chrome.onMenuItems = ^(NSString *menu, void (^completion)(NSArray<NSDictionary *> *)) {
+            [weakSelf askPage:@"menuItems" argument:menu completion:^(NSString *answer) {
+                if ([answer isEqualToString:@"open"]) {
+                    completion(nil);
+                    return;
+                }
+                NSData *data = [answer dataUsingEncoding:NSUTF8StringEncoding];
+                id list = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+                NSMutableArray<NSDictionary *> *items = [NSMutableArray array];
+                if ([list isKindOfClass:NSArray.class]) {
+                    for (id item in (NSArray *)list) {
+                        if ([item isKindOfClass:NSDictionary.class]) {
+                            [items addObject:item];
+                        }
+                    }
+                }
+                completion(items);
+            }];
+        };
+        chrome.onMenuPick = ^(NSString *menu, NSDictionary *item) {
+            NSString *title = [item[@"title"] isKindOfClass:NSString.class] ? item[@"title"] : @"";
+            NSString *argument = [NSString stringWithFormat:@"%@\n%ld\n%@", menu, (long)[item[@"index"] integerValue], title];
+            [weakSelf askPage:@"menuPick" argument:argument completion:^(NSString *answer) {
+                if (![answer isEqualToString:@"ok"]) {
+                    [weakSelf logEvent:[NSString stringWithFormat:@"native %@ menu: %@", menu, answer]];
+                }
+            }];
+        };
         [self takeOverWebViewBottom];
         [self.view insertSubview:chrome aboveSubview:self.webView];
         [NSLayoutConstraint activateConstraints:@[
@@ -1115,8 +1215,8 @@ static const CGFloat kMessageBarHeight = 80;
     }
     ChatListViewController *list = [[ChatListViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
     __weak typeof(self) weakSelf = self;
-    list.onOpenChat = ^(NSString *chatID) {
-        [weakSelf openPath:[@"/chat/" stringByAppendingString:chatID] action:@"openChat" argument:chatID];
+    list.onOpenPath = ^(NSString *path) {
+        [weakSelf openPath:path action:@"openPath" argument:path];
     };
     list.onNewChat = ^{
         [weakSelf openPath:@"/new" action:@"newChat" argument:nil];
@@ -1149,6 +1249,22 @@ static const CGFloat kMessageBarHeight = 80;
         return;
     }
     [self.webView loadRequest:[NSURLRequest requestWithURL:url]];
+}
+
+/// Runs one of the page's actions (window.__appChrome.run) and hands back its
+/// answer as text ("" when the page gave none).
+- (void)askPage:(NSString *)name argument:(NSString *)argument completion:(void (^)(NSString *answer))completion {
+    if (@available(iOS 15.0, *)) {
+        [self.webView callAsyncJavaScript:@"return window.__appChrome ? await window.__appChrome.run(name, arg) : '';"
+                                arguments:@{@"name": name, @"arg": argument ?: @""}
+                                  inFrame:nil
+                           inContentWorld:WKContentWorld.pageWorld
+                        completionHandler:^(id result, NSError *error) {
+            completion([result isKindOfClass:NSString.class] ? result : @"");
+        }];
+    } else {
+        completion(@"");
+    }
 }
 
 /// Asks the page to press one of claude.ai's controls (app-tweaks.js,

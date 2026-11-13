@@ -138,6 +138,7 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(s3.topHeight, 40, "how far claude.ai's top bar reaches");
   assert.ok(!cd.querySelector("aside").hasAttribute("data-app-hidden"), "sidebar panel untouched");
   assert.strictEqual(chat.w.__appChrome.run("more"), "ok");
+  assert.strictEqual(chat.clicks[chat.clicks.length - 1], "More options for Chat");
 
   // Voice mode: claude.ai's own message box is shown again and the app is told,
   // until claude.ai's voice button is back.
@@ -165,13 +166,15 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   const GA = "4407ad06-cdee-427d-ae9c-fb9a4db6c0d9", GB = "5681ff6f-e872-4539-91f3-c38fb5bc04e1", GC = "172b4950-1441-4bd4-9e21-0dfb407689e7";
   const g = page('<aside><button aria-label="Show sidebar" data-rect="10,8,32,32">≡</button><button data-rect="4,86,271,32">Search</button>' +
     '<button data-rect="10,276,261,29">Starred</button><a href="/chat/' + GA + '">Pinned one</a>' +
-    '<button data-rect="4,376,271,32">Morning briefing</button><a href="/chat/' + GB + '">Second</a>' +
-    '<button data-rect="10,600,233,29">Recents</button><button aria-label="Filter and group recents" data-rect="247,602,24,24">f</button>' +
+    '<a href="/artifact/Xog38J8m">An artifact</a><a href="/artifacts">Artifacts</a><button data-rect="4,376,271,32">Morning briefing</button><a href="/chat/' + GB + '">Second</a>' +
+    '<button data-rect="10,560,233,29">Closed group</button><button data-rect="10,600,233,29">Recents</button><button aria-label="Filter and group recents" data-rect="247,602,24,24">f</button>' +
     '<a href="/chat/' + GC + '">Third</a></aside>' + COMPOSER);
   g.w.__appChrome.chatGroupsFromPage();
   assert.deepStrictEqual(g.chatLists[g.chatLists.length - 1], { groups: [
-    { name: "Starred", chats: [{ id: GA, name: "Pinned one" }, { id: GB, name: "Second" }] },
-    { name: "Recents", chats: [{ id: GC, name: "Third" }] }] });
+    { name: "Starred", chats: [{ path: "/chat/" + GA, name: "Pinned one" }, { path: "/artifact/Xog38J8m", name: "An artifact" },
+      { path: "/chat/" + GB, name: "Second" }] },
+    { name: "Closed group", chats: [] },
+    { name: "Recents", chats: [{ path: "/chat/" + GC, name: "Third" }] }] });
   assert.ok(!/Pinned one|Starred/.test(g.w.__appDebugLog()), "names stay out of the debug log");
 
   // The chat list claude.ai fetched goes to the app: id, name, time; anything
@@ -182,8 +185,34 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.deepStrictEqual(chat.chatLists[0], { chats: [{ id: ID1, name: "First", updated: Date.parse("2026-11-11T10:00:00Z") }] });
   assert.strictEqual(chat.chatLists[1].chats[0].name, "Second");
   assert.ok(!/First|Second/.test(chat.w.__appDebugLog()), "chat names stay out of the debug log");
-  assert.strictEqual(chat.w.__appChrome.run("openChat", "../../evil"), "not a chat id");
-  assert.strictEqual(chat.clicks[chat.clicks.length - 1], "More options for Chat");
+  assert.strictEqual(chat.w.__appChrome.run("openPath", "/chat/../../evil"), "not a chat address");
+  assert.strictEqual(chat.w.__appChrome.run("openPath", "https://evil.example/chat/x"), "not a chat address");
+
+  // The model menu: claude.ai's menu is opened unseen, read, and closed; a pick
+  // presses the item in it.
+  const md = chat.w.document;
+  const modelButton = md.querySelector('[aria-label^="Model:"]');
+  let picked = "";
+  modelButton.addEventListener("click", () => {
+    const open = md.querySelector('[role="menu"]');
+    if (open) { open.remove(); return; }
+    const menu = md.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = '<div role="menuitemradio" aria-checked="true">Opus 5.5</div><div role="menuitemradio" aria-checked="false">Sonnet 5.5</div>' +
+      '<div role="menuitem" aria-haspopup="menu">More models</div>';
+    menu.addEventListener("click", (e) => { picked = e.target.textContent; menu.remove(); });
+    md.body.appendChild(menu);
+  });
+  const listed = JSON.parse(await chat.w.__appChrome.run("menuItems", "model"));
+  assert.deepStrictEqual(listed.map((i) => i.title), ["Opus 5.5", "Sonnet 5.5", "More models"]);
+  assert.strictEqual(listed[0].checked, true);
+  assert.strictEqual(listed[2].sub, true);
+  assert.ok(!md.querySelector('[role="menu"]'), "claude.ai's menu closed again");
+  assert.ok(!md.documentElement.classList.contains("app-menu-quiet"), "menus visible again");
+  assert.strictEqual(await chat.w.__appChrome.run("menuPick", "model\n1\nSonnet 5.5"), "ok");
+  assert.strictEqual(picked, "Sonnet 5.5");
+  assert.ok(!md.documentElement.classList.contains("app-menu-quiet"));
+  assert.strictEqual(await chat.w.__appChrome.run("menuItems", "nothing"), "[]");
 
   // Pages other than new chat and chats keep claude.ai's own controls.
   const r = page(HEADER + COMPOSER, "https://claude.ai/projects");

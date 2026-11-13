@@ -4,12 +4,47 @@
 //
 
 #import "ChatListViewController.h"
+#import <CoreText/CoreText.h>
 
 static NSString *const kChatListFile = @"chat-list.plist";
 static const NSUInteger kChatListLimit = 500;
 /// Chats the page has not listed again for this long are dropped (deleted
 /// chats would otherwise stay for ever).
 static const NSTimeInterval kChatListKeep = 14 * 24 * 3600.0;
+/// Titles of the sections the user has closed in the native list.
+static NSString *const kCollapsedSectionsKey = @"ChatListCollapsedSections";
+
+/// The text without the symbols this iOS has no picture for (newer emoji show
+/// as a question-mark box); the text itself when nothing readable is left.
+static NSString *ReadableText(NSString *text) {
+    if (text.length == 0) {
+        return text;
+    }
+    CTFontRef base = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, 17, NULL);
+    if (base == NULL) {
+        return text;
+    }
+    NSMutableString *readable = [NSMutableString string];
+    CFStringRef whole = (__bridge CFStringRef)text;
+    [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                             options:NSStringEnumerationByComposedCharacterSequences
+                          usingBlock:^(NSString *part, NSRange range, NSRange enclosing, BOOL *stop) {
+        if (part == nil) {
+            return;
+        }
+        CTFontRef font = CTFontCreateForString(base, whole, CFRangeMake((CFIndex)range.location, (CFIndex)range.length));
+        NSString *fontName = font ? CFBridgingRelease(CTFontCopyPostScriptName(font)) : nil;
+        if (font) {
+            CFRelease(font);
+        }
+        if (fontName == nil || [fontName rangeOfString:@"LastResort"].location == NSNotFound) {
+            [readable appendString:part];
+        }
+    }];
+    CFRelease(base);
+    NSString *trimmed = [readable stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return trimmed.length ? trimmed : text;
+}
 
 #pragma mark - Store
 
@@ -58,7 +93,31 @@ static NSArray<NSDictionary *> *gGroups = nil;
              @"seen": seenAt};
 }
 
-/// Sections in the stored shape: {name, chats: [{id, name}]}; anything else is left out.
+/// A section item's address: /chat/…, /artifact/…, /code/… or /project/… made of
+/// letters, digits, "_", "-" and "/" only. Older files hold {id} for chats.
++ (NSString *)itemPath:(NSDictionary *)item {
+    id path = item[@"path"];
+    if (![path isKindOfClass:NSString.class] && [self isChatID:item[@"id"]]) {
+        path = [@"/chat/" stringByAppendingString:[(NSString *)item[@"id"] lowercaseString]];
+    }
+    if (![path isKindOfClass:NSString.class]) {
+        return nil;
+    }
+    NSString *text = path;
+    BOOL known = NO;
+    for (NSString *prefix in @[@"/chat/", @"/artifact/", @"/code/", @"/project/"]) {
+        known = known || ([text hasPrefix:prefix] && text.length > prefix.length);
+    }
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                               @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-/"];
+    if (!known || text.length > 140 || [text rangeOfString:@"//"].location != NSNotFound
+        || [text rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) {
+        return nil;
+    }
+    return text;
+}
+
+/// Sections in the stored shape: {name, chats: [{path, name}]}; anything else is left out.
 + (NSArray<NSDictionary *> *)groupsFrom:(id)value {
     NSMutableArray<NSDictionary *> *groups = [NSMutableArray array];
     if (![value isKindOfClass:NSArray.class]) {
@@ -73,17 +132,15 @@ static NSArray<NSDictionary *> *gGroups = nil;
         id list = source[@"chats"];
         if ([list isKindOfClass:NSArray.class]) {
             for (id chat in (NSArray *)list) {
-                if (![chat isKindOfClass:NSDictionary.class] || ![self isChatID:((NSDictionary *)chat)[@"id"]]) {
+                NSString *path = [chat isKindOfClass:NSDictionary.class] ? [self itemPath:chat] : nil;
+                if (path == nil) {
                     continue;
                 }
                 NSString *name = [self cleanName:((NSDictionary *)chat)[@"name"] limit:200];
-                [chats addObject:@{@"id": [(NSString *)((NSDictionary *)chat)[@"id"] lowercaseString],
-                                   @"name": name.length ? name : @"Untitled"}];
+                [chats addObject:@{@"path": path, @"name": name.length ? name : @"Untitled"}];
             }
         }
-        if (chats.count) {
-            [groups addObject:@{@"name": [self cleanName:source[@"name"] limit:60], @"chats": chats}];
-        }
+        [groups addObject:@{@"name": [self cleanName:source[@"name"] limit:60], @"chats": chats}];
     }
     return groups;
 }
@@ -126,17 +183,45 @@ static NSArray<NSDictionary *> *gGroups = nil;
 
 + (void)setGroups:(NSArray *)groups {
     [self loadIfNeeded];
-    NSArray<NSDictionary *> *clean = [self groupsFrom:groups];
-    if (clean.count == 0) {
+    NSMutableDictionary<NSString *, NSArray *> *known = [NSMutableDictionary dictionary];
+    for (NSDictionary *group in gGroups) {
+        known[group[@"name"]] = group[@"chats"];
+    }
+    // A section without items is one claude.ai shows closed: it keeps the items
+    // it had; an unknown name without items is not a section.
+    NSMutableArray<NSDictionary *> *clean = [NSMutableArray array];
+    NSUInteger items = 0;
+    for (NSDictionary *group in [self groupsFrom:groups]) {
+        NSArray *chats = group[@"chats"];
+        if (chats.count == 0) {
+            chats = known[group[@"name"]];
+            if (chats.count == 0 || [group[@"name"] length] == 0) {
+                continue;
+            }
+        } else {
+            items += chats.count;
+        }
+        [clean addObject:@{@"name": group[@"name"], @"chats": chats}];
+    }
+    if (items == 0) {
         return;
     }
     gGroups = clean;
     // The chats in the sections are known chats too (kept, and searchable).
     NSMutableArray *all = [NSMutableArray array];
     for (NSDictionary *group in clean) {
-        [all addObjectsFromArray:group[@"chats"]];
+        for (NSDictionary *item in group[@"chats"]) {
+            NSString *path = item[@"path"];
+            if ([path hasPrefix:@"/chat/"] && [self isChatID:[path substringFromIndex:6]]) {
+                [all addObject:@{@"id": [path substringFromIndex:6], @"name": item[@"name"]}];
+            }
+        }
     }
-    [self mergeChats:all force:YES];
+    if (all.count) {
+        [self mergeChats:all force:YES];
+    } else {
+        [self saveSoon:YES];
+    }
 }
 
 + (void)mergeChats:(NSArray *)items {
@@ -240,6 +325,7 @@ static NSArray<NSDictionary *> *gGroups = nil;
     NSArray<NSDictionary *> *_everyChat;
     BOOL _searching;
     NSRelativeDateTimeFormatter *_dates;
+    NSMutableSet<NSString *> *_collapsed;
 }
 
 - (void)viewDidLoad {
@@ -261,6 +347,13 @@ static NSArray<NSDictionary *> *gGroups = nil;
     _dates = [[NSRelativeDateTimeFormatter alloc] init];
     _dates.unitsStyle = NSRelativeDateTimeFormatterUnitsStyleFull;
 
+    NSArray *closed = [NSUserDefaults.standardUserDefaults arrayForKey:kCollapsedSectionsKey];
+    _collapsed = [NSMutableSet set];
+    for (id title in closed) {
+        if ([title isKindOfClass:NSString.class]) {
+            [_collapsed addObject:title];
+        }
+    }
     [self buildSections];
     _sections = _browse;
 }
@@ -281,23 +374,25 @@ static NSArray<NSDictionary *> *gGroups = nil;
     for (NSDictionary *group in [ChatListStore groups]) {
         NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
         for (NSDictionary *item in group[@"chats"]) {
-            NSString *chatID = item[@"id"];
-            NSDictionary *known = byID[chatID];
-            NSDictionary *row = @{@"id": chatID, @"name": item[@"name"], @"updated": known[@"updated"] ?: @0};
+            NSString *path = item[@"path"];
+            NSDictionary *known = [path hasPrefix:@"/chat/"] ? byID[[path substringFromIndex:6]] : nil;
+            NSDictionary *row = @{@"path": path, @"name": ReadableText(item[@"name"]), @"updated": known[@"updated"] ?: @0};
             [rows addObject:row];
-            if (![placed containsObject:chatID]) {
-                [placed addObject:chatID];
+            if (![placed containsObject:path]) {
+                [placed addObject:path];
                 [every addObject:row];
             }
         }
-        NSString *title = [group[@"name"] length] ? group[@"name"] : @"Chats";
+        NSString *title = [group[@"name"] length] ? ReadableText(group[@"name"]) : @"Chats";
         [sections addObject:@{@"kind": @"chats", @"title": title, @"chats": rows}];
     }
     NSMutableArray<NSDictionary *> *rest = [NSMutableArray array];
     for (NSDictionary *chat in chats) {
-        if (![placed containsObject:chat[@"id"]]) {
-            [rest addObject:chat];
-            [every addObject:chat];
+        NSString *path = [@"/chat/" stringByAppendingString:chat[@"id"]];
+        if (![placed containsObject:path]) {
+            NSDictionary *row = @{@"path": path, @"name": ReadableText(chat[@"name"]), @"updated": chat[@"updated"]};
+            [rest addObject:row];
+            [every addObject:row];
         }
     }
     if (rest.count || placed.count == 0) {
@@ -365,12 +460,70 @@ static NSArray<NSDictionary *> *gGroups = nil;
     if ([kind isEqualToString:@"more"]) {
         return 2;
     }
+    if ([_collapsed containsObject:info[@"title"]]) {
+        return 0;
+    }
     return (NSInteger)[info[@"chats"] count];
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+/// A titled section's heading is a button: tapping it closes or opens the
+/// section, and that is remembered.
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
     NSString *title = [self sectionAt:section][@"title"];
-    return title.length ? title : nil;
+    if (title.length == 0) {
+        return nil;
+    }
+    BOOL closed = [_collapsed containsObject:title];
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.tag = section;
+    button.tintColor = UIColor.secondaryLabelColor;
+    button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+    button.semanticContentAttribute = UISemanticContentAttributeForceRightToLeft; // chevron after the title
+    UIImageSymbolConfiguration *small = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightSemibold];
+    [button setImage:[UIImage systemImageNamed:closed ? @"chevron.right" : @"chevron.down" withConfiguration:small]
+            forState:UIControlStateNormal];
+    NSUInteger count = [[self sectionAt:section][@"chats"] count];
+    [button setTitle:closed ? [NSString stringWithFormat:@"%@ (%lu)  ", title, (unsigned long)count]
+                            : [title stringByAppendingString:@"  "]
+            forState:UIControlStateNormal];
+    button.accessibilityLabel = title;
+    button.accessibilityValue = closed ? @"closed" : @"open";
+    [button addTarget:self action:@selector(toggleSection:) forControlEvents:UIControlEventTouchUpInside];
+
+    UIView *header = [[UIView alloc] init];
+    [header addSubview:button];
+    [NSLayoutConstraint activateConstraints:@[
+        [button.leadingAnchor constraintEqualToAnchor:header.layoutMarginsGuide.leadingAnchor constant:8],
+        [button.trailingAnchor constraintEqualToAnchor:header.layoutMarginsGuide.trailingAnchor],
+        [button.topAnchor constraintEqualToAnchor:header.topAnchor],
+        [button.bottomAnchor constraintEqualToAnchor:header.bottomAnchor],
+    ]];
+    return header;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    return [[self sectionAt:section][@"title"] length] ? 40 : UITableViewAutomaticDimension;
+}
+
+- (void)toggleSection:(UIButton *)sender {
+    NSInteger section = sender.tag;
+    if (section < 0 || (NSUInteger)section >= _sections.count) {
+        return;
+    }
+    NSString *title = [self sectionAt:section][@"title"];
+    if (title.length == 0) {
+        return;
+    }
+    if ([_collapsed containsObject:title]) {
+        [_collapsed removeObject:title];
+    } else {
+        [_collapsed addObject:title];
+    }
+    [NSUserDefaults.standardUserDefaults setObject:_collapsed.allObjects forKey:kCollapsedSectionsKey];
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:(NSUInteger)section]
+                  withRowAnimation:UITableViewRowAnimationAutomatic];
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
@@ -435,11 +588,11 @@ static NSArray<NSDictionary *> *gGroups = nil;
         if ((NSUInteger)indexPath.row >= chats.count) {
             return;
         }
-        NSString *chatID = chats[(NSUInteger)indexPath.row][@"id"];
-        void (^open)(NSString *) = self.onOpenChat;
+        NSString *path = chats[(NSUInteger)indexPath.row][@"path"];
+        void (^open)(NSString *) = self.onOpenPath;
         [self runAndClose:^{
-            if (open) {
-                open(chatID);
+            if (open && path) {
+                open(path);
             }
         }];
     }

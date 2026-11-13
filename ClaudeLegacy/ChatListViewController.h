@@ -23,7 +23,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)mergeChats:(NSArray *)items;
 
 /// The sections of claude.ai's sidebar in its order (Starred, your own groups,
-/// Recents). Each: name (NSString, may be empty), chats (array of {id, name}).
+/// Recents). Each: name (NSString, may be empty), chats (array of {path, name};
+/// path is the item's claude.ai address: /chat/…, /artifact/…, /code/…, /project/…).
+/// A section reported without items (closed in claude.ai) keeps its last items.
 + (NSArray<NSDictionary *> *)groups;
 + (void)setGroups:(NSArray *)groups;
 
@@ -33,7 +35,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// for everything else (projects, settings), and a row for the app's menu.
 @interface ChatListViewController : UITableViewController <UISearchResultsUpdating>
 
-@property (nonatomic, copy, nullable) void (^onOpenChat)(NSString *chatID);
+/// path: /chat/<id> or another item address from a section.
+@property (nonatomic, copy, nullable) void (^onOpenPath)(NSString *path);
 @property (nonatomic, copy, nullable) void (^onNewChat)(void);
 @property (nonatomic, copy, nullable) void (^onShowClaudeMenu)(void);
 /// The app's own menu (reload, page size, advanced, debug log).
