@@ -201,6 +201,32 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(dc.clicks[dc.clicks.length - 1], "Cancel dictation");
   assert.strictEqual(dc.w.__appChrome.run("dictateFinish"), "ok");
   assert.strictEqual(dc.clicks[dc.clicks.length - 1], "Finish dictation");
+  // A moment later claude.ai replaces the text box by its sound display: still
+  // in use, still hidden.
+  dd.querySelector('[contenteditable]').remove();
+  await new Promise((res) => setTimeout(res, 300));
+  const ds2 = dc.posted[dc.posted.length - 1];
+  assert.strictEqual(ds2.ready, true, "in use without the text box while dictating: " + ds2.why);
+  assert.strictEqual(ds2.dictating, true);
+  assert.ok(dd.querySelector("fieldset").hasAttribute("data-app-collapsed"), "box still hidden");
+
+  // At launch claude.ai draws the box, then draws it anew: the new one is hidden
+  // in the same moment, and what the boxes were is remembered for the next launch.
+  const el2 = page(HEADER + SIDEBAR + '<div class="early-stand-in-wrapper one" data-rect="20,180,310,60"><textarea data-rect="29,190,291,32"></textarea></div>');
+  await new Promise((res) => setTimeout(res, 50));
+  const ed = el2.w.document;
+  assert.ok(ed.querySelector("textarea").closest("[data-app-hidden]"), "stand-in hidden");
+  ed.querySelector(".early-stand-in-wrapper").remove();
+  const real = ed.createElement("div");
+  real.className = "real-box-in-the-middle two";
+  real.setAttribute("data-rect", "20,230,320,50");
+  real.innerHTML = '<div contenteditable="true" aria-label="Write your prompt to Claude" data-rect="33,238,299,22"></div>';
+  ed.body.appendChild(real);
+  await new Promise((res) => setTimeout(res, 20)); // well under the 120 ms timer
+  assert.ok(real.querySelector("[contenteditable]").closest("[data-app-hidden]"), "redrawn box hidden at once");
+  const remembered = JSON.parse(el2.w.localStorage.getItem("__appEarlyBox"));
+  assert.ok(remembered.early.some((sel) => sel.includes("early-stand-in-wrapper")) && remembered.early.some((sel) => sel.includes("real-box-in-the-middle")),
+    "early boxes remembered: " + JSON.stringify(remembered));
 
   // The sidebar's sections: small text buttons are headings, links are chats; a
   // row that is a button (32 px) is not a heading.

@@ -1296,7 +1296,7 @@
   function earlySelectors() {
     try {
       var saved = JSON.parse(localStorage.getItem(EARLY_KEY) || "{}");
-      return [saved.new, saved.chat].filter(function (sel) {
+      return [saved.new, saved.chat].concat(Array.isArray(saved.early) ? saved.early.slice(0, 6) : []).filter(function (sel) {
         return typeof sel === "string" && /^[a-z]+\[class="[^"\\]{1,400}"\]$/.test(sel);
       });
     } catch (e) {
@@ -1307,14 +1307,29 @@
     if (earlyStyle && earlyStyle.parentNode) earlyStyle.parentNode.removeChild(earlyStyle);
     earlyStyle = null;
   }
+  // kind "new" / "chat": the message box card once the app is in use; "early":
+  // the boxes claude.ai draws before that (up to 6 kept). Only a class list that
+  // is long enough to be particular and matches this one element is kept, so the
+  // style cannot hide anything else.
+  var rememberedBoxes = [];
   function rememberBox(kind, el) {
     try {
-      var cls = el && typeof el.className === "string" ? el.className : "";
-      if (!cls || cls.length > 400 || /["\\]/.test(cls)) return;
-      var saved = JSON.parse(localStorage.getItem(EARLY_KEY) || "{}");
+      if (!el || rememberedBoxes.indexOf(el) !== -1) return;
+      rememberedBoxes.push(el);
+      var cls = typeof el.className === "string" ? el.className : "";
+      if (cls.length < 12 || cls.length > 400 || /["\\]/.test(cls)) return;
       var sel = el.tagName.toLowerCase() + '[class="' + cls + '"]';
-      if (saved[kind] === sel) return;
-      saved[kind] = sel;
+      if (document.querySelectorAll(sel).length !== 1) return;
+      var saved = JSON.parse(localStorage.getItem(EARLY_KEY) || "{}");
+      if (kind === "early") {
+        var list = Array.isArray(saved.early) ? saved.early : [];
+        if (list.indexOf(sel) !== -1 || sel === saved.new || sel === saved.chat) return;
+        list.unshift(sel);
+        saved.early = list.slice(0, 6);
+      } else {
+        if (saved[kind] === sel) return;
+        saved[kind] = sel;
+      }
       localStorage.setItem(EARLY_KEY, JSON.stringify(saved));
     } catch (e) {}
   }
@@ -1406,13 +1421,19 @@
     var samePage = !!found && found.path === location.pathname;
     // The message box card found before is kept while it still holds the text
     // box and send button (it is collapsed, so it cannot be measured again).
-    if (found && found.composer && found.composer.isConnected && c.editor && c.send &&
-        found.composer.contains(c.editor) && found.composer.contains(c.send)) {
+    // A moment into dictation claude.ai also replaces the text box by a sound
+    // display (log 14 Nov: "missing message box" while dictating): the card is
+    // then known by its "Finish dictation" button alone.
+    c.dictation = !!find(DICTATION_FINISH);
+    var holdsText = function (box) { return c.editor ? box.contains(c.editor) : c.dictation; };
+    if (found && found.composer && found.composer.isConnected && c.send &&
+        found.composer.contains(c.send) && holdsText(found.composer)) {
       c.composer = found.composer;
-    } else if (c.editor && c.send) {
+    } else if (c.send && (c.editor || c.dictation)) {
       // The whole card: the text, + and model buttons, mic, send.
       var box = holding([c.editor, c.send, find('button[aria-label^="Model:"]'),
-        find('button[aria-label="Add files, connectors, and more"]')]) || holding([c.editor, c.send]);
+        find('button[aria-label="Add files, connectors, and more"]'), find(DICTATION_CANCEL)]) ||
+        holding([c.editor, c.send, find(DICTATION_CANCEL)]);
       if (box) c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
     }
     var searched = false; // the page was searched for the top bar with its message box there
@@ -1470,12 +1491,17 @@
       var editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]') || earlyField();
       if (!editor) return false;
       if (find('button[aria-label="Send message"]')) return true;
-      // The text box is drawn about a second before its buttons (video 13 Nov):
-      // it is hidden then already (see earlyBox in updateChrome).
-      return hiddenNow.length === 0 && (!earlySince || performance.now() - earlySince < EARLY_MS);
+      // The text box is drawn about a second before its buttons (video 13 Nov),
+      // and drawn anew once or twice on the way (first a stand-in, then the real
+      // one in the middle, then at the bottom): each one that is not hidden yet
+      // is hidden at once (see earlyBox in updateChrome).
+      if (earlySince && performance.now() - earlySince >= EARLY_MS) return false;
+      return !editor.closest("[data-app-hidden]");
     }
-    return found.path !== location.pathname || !found.composer.isConnected ||
-      !found.editor || !found.editor.isConnected || !stillThere(found.topBar);
+    // While claude.ai dictates its text box is gone on purpose (its sound
+    // display changes many times a second: no search for each change).
+    var textGone = !find(DICTATION_FINISH) && (!found.editor || !found.editor.isConnected);
+    return found.path !== location.pathname || !found.composer.isConnected || textGone || !stillThere(found.topBar);
   }
   function describeElement(el) {
     if (!el) return "none";
@@ -1670,7 +1696,9 @@
           (field.hasAttribute("contenteditable") ? " contenteditable=" + field.getAttribute("contenteditable") : "") + ")"));
     }
     if (now - earlySince >= EARLY_MS) return null;
-    return wholeControl(field, field.getBoundingClientRect().height + 60);
+    var wrapper = wholeControl(field, field.getBoundingClientRect().height + 60);
+    rememberBox("early", wrapper);
+    return wrapper;
   }
   // What is in the middle of the page while the app is not ready yet (launch):
   // tells which element claude.ai's early message box is, when it was not found.
@@ -1735,7 +1763,7 @@
     var kind = pageKind();
     var own = kind !== "other" && inTakeover(c);
     var missing = [];
-    if (!c.editor) missing.push("message box");
+    if (!c.editor && !c.dictation) missing.push("message box");
     if (!c.send) missing.push("send button");
     if (!c.composer) missing.push("message box card");
     var ready = kind !== "other" && (missing.length === 0 || own);

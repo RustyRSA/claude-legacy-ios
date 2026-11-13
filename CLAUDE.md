@@ -329,6 +329,23 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   to the native bar as before.
 - Model menu: "Close" and the plan note are left out; "More models" is a submenu,
   current models and "Effort" stay in the menu itself.
+- Installed 14 Nov (`62dcc41`). Logan: box flashes again at launch (once mid-screen,
+  once above the bar); dictation right for a second, then claude.ai's box again; model
+  menu works. He runs other Claude Code sessions at the same time: this repo, its
+  builds and installs were only this session's (checked).
+
+### Round 19 (14 Nov 2026)
+- Launch: claude.ai draws the box up to three times (textarea stand-in, real box in
+  the middle, real box at the bottom). `chromeStale()` treated "something is hidden"
+  as done although that something was the removed stand-in, so each redraw waited for
+  the 120 ms timer. Now any early field not inside a hidden element counts as stale
+  (hidden in the same turn), and each early wrapper's tag + class list is remembered
+  (`__appEarlyBox.early`, 6 kept; only class lists of 12+ characters that match one
+  element) for the style applied at document start of the next launch.
+- Dictation: a moment in, claude.ai replaces the text box by a sound display, so
+  "message box" went missing and the app stepped aside. While "Finish dictation" is
+  there the card needs no text box (`c.dictation`), and the page is not searched again
+  for every change of the sound display.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
