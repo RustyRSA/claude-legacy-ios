@@ -187,8 +187,43 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   address is loaded. Limit: only chats claude.ai has listed on this phone.
 - 13d: "App settings" row in the native chat list opens the app menu (`-showAppMenu`, also
   still on the three-finger long press); light haptic on send.
-- 13b, 13c, 13d built (`75ef417`, `6e61161`, next commit), none checked on device yet.
-- Next: native menus (+, model, "..."), check 13b/13c on device.
+- 13b–13d (`d301147`) installed 12–13 Nov. Log 13 Nov 18:57 and Logan's notes: chat list
+  got 30 chats from claude.ai's list (shape guess right); top bar found as one group.
+  Problems: claude.ai's controls show before / in front of the native ones at launch and
+  on chat switches; big empty gap under the last message; start page (greeting, recent
+  artifacts) off-centre and running under the message bar; claude.ai's + and model menus
+  clipped by the bar; voice mode invisible (it runs in claude.ai's hidden box), then the
+  old UI came back; chat list without his sections (pinned, own groups, recents); "App
+  settings" row slow to open. Also: page process stopped by iOS with the app open, 46 s
+  after launch (memory; cause not known).
+
+### Round 14 (13 Nov 2026) — page ends at the message bar
+- No flash: the page's MutationObserver sets the hidden marks in the same turn when the
+  controls appear or are replaced (`chromeStale()`), before the screen is drawn; the
+  120 ms timer remains for ordinary state changes. While the message box is missing the
+  page is not searched for a top bar (3 selectors per change only).
+- Page ends at the bar: the storyboard's bottom constraint of the web view is replaced
+  (`-takeOverWebViewBottom`, `webBottomConstraint`); the native message bar reports
+  80 pt (`onBarInset`) while shown, 0 when hidden. claude.ai's message box is collapsed
+  to no height (`data-app-collapsed`) besides being invisible, so messages end right
+  above the bar, the start page centres in what is visible, and claude.ai's menus open
+  above the bar. The found message box card is kept while it holds the editor and send
+  button (collapsed, it cannot be measured again).
+- Voice mode / dictation ("takeover"): claude.ai's own message box is shown and the
+  native message bar hidden (`composerShown` in the state, top bar stays) from the tap
+  until claude.ai's voice / dictate button is back and its box is empty (dictated text
+  is sent or cleared there); 5 s limit when it never starts.
+- Chat list sections: `chatGroupsFromPage()` reads claude.ai's sidebar (`aside`): small
+  text buttons (under 31 px, no label) are headings, `a[href^="/chat/"]` the chats;
+  sent as `{groups}` to the `chatList` handler, stored with the chats
+  (`chat-list.plist` is now `{chats, groups}`). The list shows those sections in
+  claude.ai's order, then "Other chats". If claude.ai changes its sidebar layout the
+  list just has no sections. Debug log: `chat list item fields:` (field names of
+  claude.ai's list items, to build sections from the data instead, later).
+- Chat list rows: a chat / New chat starts at once while the sheet slides away; the two
+  menu rows close the sheet without animation first.
+- Still claude.ai's own UI: + menu, model menu, chat "..." menu (Phase B, next).
+- Not checked on device yet.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
@@ -459,7 +494,7 @@ Usability 3/4/8 · Performance 2/6/7-8 · Reliability 3/7/8 · Functional comple
 | Phase | Work | Status |
 |---|---|---|
 | A | Native controls stage 1: verify on device, keep the last message clear of the native box, keyboard stays after sending | In progress (round 13 generic bars built on 12e, awaiting device check) |
-| B | Native menus: +, model, chat "..." as UIMenu filled from claude.ai's options | Next |
+| B | Native menus: +, model, chat "..." as UIMenu filled from claude.ai's options | Next (round 14 only stops the bar clipping claude.ai's menus) |
 | C | Native chat list: cached on the phone (instant at launch), search | First version built (13c), awaiting device check |
 | D | Message styling: user bubble, serif replies, spacing, reply toolbar, scroll-down button | Planned |
 | E | Polish: haptics, edge swipe for the chat list, long-press menus, sheets for artifacts/files | Planned |

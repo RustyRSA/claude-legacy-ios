@@ -321,6 +321,11 @@ API_AVAILABLE(ios(15.0))
 /// At launch, when the controls were in use last time: shown at once, with the
 /// buttons off until the page reports.
 - (void)showWhileLoading;
+/// How much of the screen's bottom the message bar takes (points above the safe
+/// area's bottom edge; 0 when it is not shown): the page ends there.
+@property (nonatomic, copy) void (^onBarInset)(CGFloat inset);
+/// Height of the message bar now, with a text of several lines.
+@property (nonatomic, readonly) CGFloat barHeight;
 /// The page's edge colours, and whether the page is dark (the controls then use
 /// the dark system colours whatever the phone is set to).
 - (void)setTopColor:(UIColor *)top bottomColor:(UIColor *)bottom dark:(BOOL)dark;
@@ -345,6 +350,8 @@ API_AVAILABLE(ios(15.0))
     NSString *_actionName;
     NSLayoutConstraint *_topBarBottom;
     NSArray<UIButton *> *_buttons;
+    BOOL _composerShown;
+    CGFloat _reportedInset;
     BOOL _shown;
     BOOL _waiting;
     NSUInteger _waitToken;
@@ -538,6 +545,25 @@ API_AVAILABLE(ios(15.0))
     [self updateActionButton];
 }
 
+/// The message bar with one line of text: 4 + model row 30 + 2 + text 36 + 8.
+static const CGFloat kMessageBarHeight = 80;
+
+- (CGFloat)barHeight {
+    return kMessageBarHeight + MAX(_textHeight.constant - 36, 0);
+}
+
+/// Tells the app where the page has to end (see onBarInset).
+- (void)reportInset {
+    CGFloat inset = (_shown && !_composerShown) ? kMessageBarHeight : 0;
+    if (inset == _reportedInset) {
+        return;
+    }
+    _reportedInset = inset;
+    if (self.onBarInset) {
+        self.onBarInset(inset);
+    }
+}
+
 /// The bars stay up while the page is not ready (loading, or rebuilding itself),
 /// with the buttons off; if the page has not come back after 15 s they go.
 - (void)beginWaiting {
@@ -575,6 +601,7 @@ API_AVAILABLE(ios(15.0))
     self.hidden = NO;
     self.alpha = 1;
     [self beginWaiting];
+    [self reportInset];
 }
 
 - (void)setShown:(BOOL)show {
@@ -582,6 +609,7 @@ API_AVAILABLE(ios(15.0))
         return;
     }
     _shown = show;
+    [self reportInset];
     if (!show && _textView.isFirstResponder) {
         [_textView resignFirstResponder];
     }
@@ -708,6 +736,18 @@ API_AVAILABLE(ios(15.0))
     [self setModel:model effort:effort];
     [self updateActionButton];
 
+    // Voice mode and dictation run in claude.ai's own message box: the app's
+    // message bar steps aside for it, the top bar stays.
+    BOOL composerShown = ready && [state[@"composerShown"] boolValue];
+    if (composerShown != _composerShown) {
+        _composerShown = composerShown;
+        _bottomBar.hidden = composerShown;
+        if (composerShown && _textView.isFirstResponder) {
+            [_textView resignFirstResponder];
+        }
+        [self reportInset];
+    }
+
     [self setShown:ready && !sidebarOpen];
 }
 
@@ -813,6 +853,8 @@ API_AVAILABLE(ios(15.0))
 @property (nonatomic, assign) BOOL chromeReady;
 /// A chat picked from the native list before the first page load: loaded first.
 @property (nonatomic, strong, nullable) NSURL *launchURL;
+/// The page's bottom edge: the safe area's, or the top of the native message bar.
+@property (nonatomic, strong, nullable) NSLayoutConstraint *webBottomConstraint;
 
 @end
 
@@ -1022,6 +1064,10 @@ API_AVAILABLE(ios(15.0))
             }
             [weakSelf runChromeAction:name argument:argument];
         };
+        chrome.onBarInset = ^(CGFloat inset) {
+            weakSelf.webBottomConstraint.constant = -inset;
+        };
+        [self takeOverWebViewBottom];
         [self.view insertSubview:chrome aboveSubview:self.webView];
         [NSLayoutConstraint activateConstraints:@[
             [chrome.topAnchor constraintEqualToAnchor:self.view.topAnchor],
@@ -1034,6 +1080,29 @@ API_AVAILABLE(ios(15.0))
             [chrome showWhileLoading];
         }
     }
+}
+
+/// The storyboard pins the page's bottom to the safe area. That constraint is
+/// replaced by one the app can move, so the page ends where the native message
+/// bar begins: the last message, claude.ai's menus and its start page then sit
+/// above the bar instead of under it.
+- (void)takeOverWebViewBottom {
+    NSLayoutConstraint *storyboard = nil;
+    for (NSLayoutConstraint *constraint in self.view.constraints) {
+        BOOL first = constraint.firstItem == self.webView && constraint.firstAttribute == NSLayoutAttributeBottom;
+        BOOL second = constraint.secondItem == self.webView && constraint.secondAttribute == NSLayoutAttributeBottom;
+        if (first || second) {
+            storyboard = constraint;
+            break;
+        }
+    }
+    if (storyboard == nil) {
+        [self logEvent:@"page bottom constraint not found: the page is not resized for the message bar"];
+        return;
+    }
+    storyboard.active = NO;
+    self.webBottomConstraint = [self.webView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor];
+    self.webBottomConstraint.active = YES;
 }
 
 #pragma mark - Native chat list
@@ -1124,7 +1193,9 @@ API_AVAILABLE(ios(15.0))
         }
         CGRect keyboard = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
         CGRect page = [self.webView convertRect:self.webView.bounds toView:nil];
-        CGFloat covered = chrome.editing ? MAX(0, CGRectGetMaxY(page) - CGRectGetMinY(keyboard)) : 0;
+        // The message bar sits on top of the keyboard: the page is covered from
+        // the bar's top edge down.
+        CGFloat covered = chrome.editing ? MAX(0, CGRectGetMaxY(page) - (CGRectGetMinY(keyboard) - chrome.barHeight)) : 0;
         NSString *argument = [NSString stringWithFormat:@"%.0f,%.0f", covered, CGRectGetWidth(page)];
         [self runChromeAction:@"keyboard" argument:argument];
     }
@@ -2630,6 +2701,10 @@ API_AVAILABLE(ios(15.0))
         id chats = [message.body isKindOfClass:NSDictionary.class] ? message.body[@"chats"] : nil;
         if ([chats isKindOfClass:NSArray.class]) {
             [ChatListStore mergeChats:chats];
+        }
+        id groups = [message.body isKindOfClass:NSDictionary.class] ? message.body[@"groups"] : nil;
+        if ([groups isKindOfClass:NSArray.class]) {
+            [ChatListStore setGroups:groups];
         }
         return;
     }

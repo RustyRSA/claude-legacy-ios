@@ -885,8 +885,16 @@
       window.webkit.messageHandlers.chatList.postMessage({ chats: chats });
     } catch (e) {}
   }
+  var chatFieldsNoted = false;
   function noteChatList(json) {
     var chats = [];
+    var first = chatItems(json)[0];
+    if (first && !chatFieldsNoted) {
+      // Field names only (never values): what claude.ai's list offers.
+      chatFieldsNoted = true;
+      record("chrome", "chat list item fields: " + Object.keys(first).slice(0, 40).join(", "));
+    }
+    nativeSetTimeout(chatGroupsFromPage, 1500);
     chatItems(json).forEach(function (item) {
       var id = item && String(item.uuid || item.id || "");
       if (!id || !CHAT_ID.test(id) || chats.length >= 300) return;
@@ -894,6 +902,49 @@
       chats.push({ id: id, name: String(item.name || item.title || "").slice(0, 200), updated: updated > 0 ? updated : 0 });
     });
     postChats(chats, "claude.ai's list");
+  }
+  // The sections of claude.ai's sidebar (Starred, your own groups, Recents) with
+  // the chats under each, read from what claude.ai drew there: section headings
+  // are its small text buttons (under 31 px tall, no label), chats are its
+  // links. Sent only when it changed. If claude.ai changes that layout the
+  // app's list simply has no sections.
+  var groupsSent = "";
+  function chatGroupsFromPage() {
+    var aside = find("aside");
+    if (!aside) return;
+    var nodes = aside.querySelectorAll('button, a[href^="/chat/"]');
+    var groups = [];
+    var heading = "";
+    var current = null;
+    var count = 0;
+    for (var i = 0; i < nodes.length && count < 300 && groups.length < 40; i++) {
+      var el = nodes[i];
+      var text = String(el.textContent || "").trim();
+      if (el.tagName === "A") {
+        var id = String(el.getAttribute("href")).slice(6).split(/[?#/]/)[0];
+        if (!CHAT_ID.test(id)) continue;
+        if (!current) {
+          current = { name: heading.slice(0, 60), chats: [] };
+          groups.push(current);
+        }
+        current.chats.push({ id: id, name: text.slice(0, 200) });
+        count++;
+      } else if (text && text.length <= 60 && !el.getAttribute("aria-label") && !el.getAttribute("data-testid")) {
+        var height = el.getBoundingClientRect().height;
+        if (height > 0 && height < 31) {
+          heading = text;
+          current = null;
+        }
+      }
+    }
+    if (!count) return;
+    var key = JSON.stringify(groups);
+    if (key === groupsSent) return;
+    groupsSent = key;
+    record("chrome", "chat list: " + groups.length + " sections with " + count + " chats from the sidebar");
+    try {
+      window.webkit.messageHandlers.chatList.postMessage({ groups: groups });
+    } catch (e) {}
   }
   // When no list was seen (claude.ai changed its address or shape): the chat
   // links claude.ai drew in its sidebar, without times.
@@ -1296,17 +1347,29 @@
     c.editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]');
     c.send = find('button[aria-label="Send message"]');
     c.sidebarButton = find('button[aria-label="Show sidebar"]');
-    if (found && found.path === location.pathname && found.editor === c.editor && found.composer &&
-        found.composer.isConnected && found.composer.contains(c.send) && stillThere(found.topBar)) {
+    var samePage = !!found && found.path === location.pathname;
+    // The message box card found before is kept while it still holds the text
+    // box and send button (it is collapsed, so it cannot be measured again).
+    if (found && found.composer && found.composer.isConnected && c.editor && c.send &&
+        found.composer.contains(c.editor) && found.composer.contains(c.send)) {
       c.composer = found.composer;
+    } else if (c.editor && c.send) {
+      // The whole card: the text, + and model buttons, mic, send.
+      var box = holding([c.editor, c.send, find('button[aria-label^="Model:"]'),
+        find('button[aria-label="Add files, connectors, and more"]')]) || holding([c.editor, c.send]);
+      if (box) c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
+    }
+    var searched = false; // the page was searched for the top bar with its message box there
+    if (samePage && stillThere(found.topBar) && (found.searched || !c.composer)) {
       c.topBar = found.topBar;
+      c.topHeight = found.topHeight;
+      searched = !!found.searched;
+    } else if (!c.composer) {
+      // Still loading (or voice mode has replaced the message box): the page is
+      // not searched for a top bar until its message box is there.
+      c.topBar = [];
+      c.topHeight = 0;
     } else {
-      if (c.editor && c.send) {
-        // The whole card: the text, + and model buttons, mic, send.
-        var box = holding([c.editor, c.send, find('button[aria-label^="Model:"]'),
-          find('button[aria-label="Add files, connectors, and more"]')]) || holding([c.editor, c.send]);
-        if (box) c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
-      }
       // The top bar's groups (in a chat they sit in different parts of the
       // layout), each hidden on its own; one inside another counts once.
       var groups = [];
@@ -1323,11 +1386,30 @@
         var bottom = g.getBoundingClientRect().bottom;
         if (bottom > topHeight && bottom <= 90) topHeight = bottom;
       });
-      found = { path: location.pathname, editor: c.editor, composer: c.composer, topBar: groups, topHeight: Math.round(topHeight) };
+      c.topHeight = Math.round(topHeight);
+      searched = true;
+    }
+    if (c.composer || (found && c.topBar !== found.topBar)) {
+      if (!found || found.composer !== c.composer || found.topBar !== c.topBar || found.path !== location.pathname) {
+        found = { path: location.pathname, editor: c.editor, composer: c.composer, topBar: c.topBar, topHeight: c.topHeight, searched: searched };
+      } else {
+        found.editor = c.editor;
+      }
     }
     c.more = null;
     c.topBar.some(function (g) { return (c.more = find('button[aria-label^="More options"]', g)); });
     return c;
+  }
+  // Something the hidden marks depend on changed (a new page, or claude.ai
+  // drew its controls again): they are set again at once, before the screen is
+  // drawn, so claude.ai's own controls never flash.
+  function chromeStale() {
+    if (pageKind() === "other") return false;
+    if (!found || !found.composer) {
+      return !!find('button[aria-label="Send message"]') && !!find(EDITOR);
+    }
+    return found.path !== location.pathname || !found.composer.isConnected ||
+      !found.editor || !found.editor.isConnected || !stillThere(found.topBar);
   }
   function describeElement(el) {
     if (!el) return "none";
@@ -1365,6 +1447,15 @@
     return /^\/chat\//.test(path) ? "chat" : "other";
   }
 
+  // claude.ai's message box takes no room either (the page ends where the app's
+  // message bar begins), so the last message sits right above the app's bar.
+  var collapsedNow = null;
+  function setCollapsed(el) {
+    if (collapsedNow === el) return;
+    if (collapsedNow) collapsedNow.removeAttribute("data-app-collapsed");
+    if (el) el.setAttribute("data-app-collapsed", "");
+    collapsedNow = el;
+  }
   var hiddenNow = [];
   // Only what changed is touched: re-setting the marks restyles the page.
   function setHidden(list) {
@@ -1398,6 +1489,7 @@
     if (open) sidebarMode.seenOpen = true;
     if ((sidebarMode.seenOpen && !open) || location.pathname !== sidebarMode.path ||
         performance.now() - sidebarMode.since > 30000) {
+      nativeSetTimeout(chatGroupsFromPage, 300);
       record("chrome", "sidebar closed (" + (location.pathname !== sidebarMode.path ? "chat picked" :
         sidebarMode.seenOpen ? "seen closing" : "30 s passed, never seen open") + ")");
       sidebarMode = null;
@@ -1419,18 +1511,44 @@
     return result;
   }
 
+  // Voice mode and dictation happen inside claude.ai's message box (its voice
+  // screen, the dictated words). While one runs, that box is shown as it is and
+  // the app's message bar steps aside. Over when claude.ai's voice / dictate
+  // button is back and its box is empty again (dictated text is sent or cleared
+  // there), or when it never started within 5 s.
+  var takeover = null;
+  function startTakeover(kind) {
+    takeover = { kind: kind, since: performance.now(), path: location.pathname, busy: false };
+  }
+  function inTakeover(c) {
+    if (!takeover) return false;
+    var idle = !!find(takeover.kind === "voice" ? 'button[aria-label="Use voice mode"]' : 'button[aria-label="Dictate"]');
+    if (!idle) takeover.busy = true;
+    var empty = !c.editor || !c.editor.textContent.replace(/\s/g, "");
+    var age = performance.now() - takeover.since;
+    var over = location.pathname !== takeover.path ||
+      (idle && empty && !!c.editor && !!c.send && age > (takeover.busy ? 800 : 5000));
+    if (!over) return true;
+    record("chrome", takeover.kind + " ended after " + Math.round(age / 1000) + " s" + (takeover.busy ? "" : " (never seen starting)"));
+    takeover = null;
+    return false;
+  }
+
   var lastHiddenFound = null;
   function updateChrome() {
     var c = chromeControls();
     var kind = pageKind();
+    var own = kind !== "other" && inTakeover(c);
     var missing = [];
     if (!c.editor) missing.push("message box");
     if (!c.send) missing.push("send button");
     if (!c.composer) missing.push("message box card");
-    var ready = kind !== "other" && missing.length === 0;
+    var ready = kind !== "other" && (missing.length === 0 || own);
     var sidebar = ready && inSidebarMode();
+    var hideBox = ready && !sidebar && !own && c.composer ? c.composer : null;
     // The sidebar button alone, never its panel: the native menu button covers it.
-    setHidden(ready && !sidebar ? c.topBar.concat([c.composer, c.sidebarButton]).filter(Boolean) : []);
+    setHidden(ready && !sidebar ? c.topBar.concat([hideBox, c.sidebarButton]).filter(Boolean) : []);
+    setCollapsed(hideBox);
     if (ready && !sidebar) {
       // Once per search of the page, not at every change of size or position.
       if (found !== lastHiddenFound) {
@@ -1450,9 +1568,10 @@
       why: kind === "other" ? "page " + location.pathname.split("/")[1] : missing.length ? "missing " + missing.join(", ") : "",
       page: kind,
       title: kind === "chat" ? chatTitle() : "",
-      topHeight: found ? found.topHeight || 0 : 0,
+      topHeight: c.topHeight || 0,
       viewWidth: window.innerWidth || 0,
       sidebarOpen: sidebar,
+      composerShown: own,
       streaming: !!(c.composer && stopButton(c.composer)),
       model: words.join(" "),
       effort: effort,
@@ -1580,6 +1699,7 @@
 
   window.__appChrome = {
     noteChatList: noteChatList,
+    chatGroupsFromPage: chatGroupsFromPage,
     run: function (name, arg) {
       var c = chromeControls();
       var result;
@@ -1605,8 +1725,15 @@
         case "more": result = press(c.more, "chat menu"); break;
         case "plus": result = press(find('button[aria-label="Add files, connectors, and more"]'), "+ button"); break;
         case "model": result = press(find('button[aria-label^="Model:"]'), "model button"); break;
-        case "dictate": result = press(find('button[aria-label="Dictate"]'), "dictate button"); break;
-        case "voice": result = press(find('button[aria-label="Use voice mode"]'), "voice button"); break;
+        case "dictate":
+        case "voice":
+          // claude.ai's box is shown first, so its voice screen or the dictated
+          // words open where they can be seen.
+          startTakeover(name);
+          updateChrome();
+          result = press(find(name === "voice" ? 'button[aria-label="Use voice mode"]' : 'button[aria-label="Dictate"]'), name + " button");
+          if (result !== "ok") takeover = null;
+          break;
         case "stop": result = press(c.composer && stopButton(c.composer), "stop button"); break;
         case "send": return sendText(String(arg || ""));
         case "keyboard": return setKeyboardRoom(arg);
@@ -1620,7 +1747,10 @@
 
   function startChrome() {
     var style = document.createElement("style");
-    style.textContent = "html.app-native-chrome [data-app-hidden]{opacity:0!important;pointer-events:none!important}";
+    style.textContent = "html.app-native-chrome [data-app-hidden]{opacity:0!important;pointer-events:none!important}" +
+      "html.app-native-chrome [data-app-collapsed]{height:0!important;min-height:0!important;max-height:0!important;" +
+      "overflow:hidden!important;padding-top:0!important;padding-bottom:0!important;margin-top:0!important;" +
+      "margin-bottom:0!important;border-width:0!important}";
     (document.head || document.documentElement).appendChild(style);
     var pending = null;
     var schedule = function () {
@@ -1628,13 +1758,20 @@
       pending = nativeSetTimeout(function () { pending = null; updateChrome(); }, 120);
     };
     try {
-      new NativeObserver(schedule).observe(document.body, {
+      // An observer runs before the screen is drawn: when the controls have
+      // just appeared or been replaced, they are hidden in that same moment.
+      new NativeObserver(function () {
+        if (chromeStale()) updateChrome();
+        else schedule();
+      }).observe(document.body, {
         childList: true, subtree: true, attributes: true, attributeFilter: ["aria-label", "disabled", "data-state"]
       });
     } catch (e) {}
     document.addEventListener("touchend", function () { nativeSetTimeout(updateChrome, 350); }, { passive: true, capture: true });
     setInterval(updateChrome, 1000);
     nativeSetTimeout(chatsFromPage, 8000);
+    nativeSetTimeout(chatGroupsFromPage, 5000);
+    setInterval(chatGroupsFromPage, 60000);
     updateChrome();
   }
 

@@ -58,6 +58,8 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.ok(doc.querySelector('[aria-label="Show sidebar"]').hasAttribute("data-app-hidden"), "sidebar button hidden");
   assert.ok(!doc.querySelector("aside").hasAttribute("data-app-hidden"), "sidebar panel untouched");
   assert.ok(doc.querySelector('[aria-label="Send message"]').closest("[data-app-hidden]"), "message box hidden");
+  assert.ok(doc.querySelector("fieldset").hasAttribute("data-app-collapsed"), "message box takes no room");
+  assert.strictEqual(state.composerShown, false);
 
   const C = p.w.__appChrome;
   assert.strictEqual(C.run("model"), "ok");
@@ -136,6 +138,41 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(s3.topHeight, 40, "how far claude.ai's top bar reaches");
   assert.ok(!cd.querySelector("aside").hasAttribute("data-app-hidden"), "sidebar panel untouched");
   assert.strictEqual(chat.w.__appChrome.run("more"), "ok");
+
+  // Voice mode: claude.ai's own message box is shown again and the app is told,
+  // until claude.ai's voice button is back.
+  const v = page(HEADER + SIDEBAR + COMPOSER);
+  await new Promise((res) => setTimeout(res, 50));
+  const vd = v.w.document;
+  const voiceButton = vd.querySelector('[aria-label="Use voice mode"]');
+  voiceButton.addEventListener("click", () => voiceButton.setAttribute("aria-label", "Stop voice mode"));
+  assert.strictEqual(v.w.__appChrome.run("voice"), "ok");
+  await new Promise((res) => setTimeout(res, 200));
+  const vs = v.posted[v.posted.length - 1];
+  assert.strictEqual(vs.ready, true);
+  assert.strictEqual(vs.composerShown, true, "app told to step aside for voice mode");
+  assert.ok(!vd.querySelector("fieldset").hasAttribute("data-app-hidden"), "claude.ai's box shown during voice mode");
+  assert.ok(!vd.querySelector("fieldset").hasAttribute("data-app-collapsed"));
+  assert.ok(vd.querySelector('[aria-label="Use incognito"]').closest("[data-app-hidden]"), "top bar still hidden");
+  voiceButton.setAttribute("aria-label", "Use voice mode");
+  await new Promise((res) => setTimeout(res, 1300));
+  const ve = v.posted[v.posted.length - 1];
+  assert.strictEqual(ve.composerShown, false, "back to the app's bar after voice mode");
+  assert.ok(vd.querySelector("fieldset").hasAttribute("data-app-collapsed"));
+
+  // The sidebar's sections: small text buttons are headings, links are chats; a
+  // row that is a button (32 px) is not a heading.
+  const GA = "4407ad06-cdee-427d-ae9c-fb9a4db6c0d9", GB = "5681ff6f-e872-4539-91f3-c38fb5bc04e1", GC = "172b4950-1441-4bd4-9e21-0dfb407689e7";
+  const g = page('<aside><button aria-label="Show sidebar" data-rect="10,8,32,32">≡</button><button data-rect="4,86,271,32">Search</button>' +
+    '<button data-rect="10,276,261,29">Starred</button><a href="/chat/' + GA + '">Pinned one</a>' +
+    '<button data-rect="4,376,271,32">Morning briefing</button><a href="/chat/' + GB + '">Second</a>' +
+    '<button data-rect="10,600,233,29">Recents</button><button aria-label="Filter and group recents" data-rect="247,602,24,24">f</button>' +
+    '<a href="/chat/' + GC + '">Third</a></aside>' + COMPOSER);
+  g.w.__appChrome.chatGroupsFromPage();
+  assert.deepStrictEqual(g.chatLists[g.chatLists.length - 1], { groups: [
+    { name: "Starred", chats: [{ id: GA, name: "Pinned one" }, { id: GB, name: "Second" }] },
+    { name: "Recents", chats: [{ id: GC, name: "Third" }] }] });
+  assert.ok(!/Pinned one|Starred/.test(g.w.__appDebugLog()), "names stay out of the debug log");
 
   // The chat list claude.ai fetched goes to the app: id, name, time; anything
   // that is not a chat is left out. Both shapes: a plain list and {data: [...]}.

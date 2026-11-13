@@ -16,6 +16,7 @@ static const NSTimeInterval kChatListKeep = 14 * 24 * 3600.0;
 @implementation ChatListStore
 
 static NSMutableArray<NSDictionary *> *gChats = nil;
+static NSArray<NSDictionary *> *gGroups = nil;
 
 + (NSURL *)fileURL {
     NSURL *dir = [[NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory
@@ -32,6 +33,12 @@ static NSMutableArray<NSDictionary *> *gChats = nil;
     return [(NSString *)value rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound;
 }
 
++ (NSString *)cleanName:(id)value limit:(NSUInteger)limit {
+    NSString *name = [value isKindOfClass:NSString.class] ? value : @"";
+    name = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return name.length > limit ? [name substringToIndex:limit] : name;
+}
+
 /// One entry in the stored shape, or nil when it is not a chat.
 + (NSDictionary *)entryFrom:(id)item seen:(NSDate *)seen {
     if (![item isKindOfClass:NSDictionary.class]) {
@@ -42,11 +49,7 @@ static NSMutableArray<NSDictionary *> *gChats = nil;
     if (![self isChatID:chatID]) {
         return nil;
     }
-    NSString *name = [source[@"name"] isKindOfClass:NSString.class] ? source[@"name"] : @"";
-    name = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (name.length > 200) {
-        name = [name substringToIndex:200];
-    }
+    NSString *name = [self cleanName:source[@"name"] limit:200];
     NSNumber *updated = [source[@"updated"] isKindOfClass:NSNumber.class] ? source[@"updated"] : @0;
     NSDate *seenAt = [source[@"seen"] isKindOfClass:NSDate.class] ? source[@"seen"] : seen;
     return @{@"id": [(NSString *)chatID lowercaseString],
@@ -55,18 +58,55 @@ static NSMutableArray<NSDictionary *> *gChats = nil;
              @"seen": seenAt};
 }
 
+/// Sections in the stored shape: {name, chats: [{id, name}]}; anything else is left out.
++ (NSArray<NSDictionary *> *)groupsFrom:(id)value {
+    NSMutableArray<NSDictionary *> *groups = [NSMutableArray array];
+    if (![value isKindOfClass:NSArray.class]) {
+        return groups;
+    }
+    for (id item in (NSArray *)value) {
+        if (![item isKindOfClass:NSDictionary.class] || groups.count >= 40) {
+            continue;
+        }
+        NSDictionary *source = item;
+        NSMutableArray<NSDictionary *> *chats = [NSMutableArray array];
+        id list = source[@"chats"];
+        if ([list isKindOfClass:NSArray.class]) {
+            for (id chat in (NSArray *)list) {
+                if (![chat isKindOfClass:NSDictionary.class] || ![self isChatID:((NSDictionary *)chat)[@"id"]]) {
+                    continue;
+                }
+                NSString *name = [self cleanName:((NSDictionary *)chat)[@"name"] limit:200];
+                [chats addObject:@{@"id": [(NSString *)((NSDictionary *)chat)[@"id"] lowercaseString],
+                                   @"name": name.length ? name : @"Untitled"}];
+            }
+        }
+        if (chats.count) {
+            [groups addObject:@{@"name": [self cleanName:source[@"name"] limit:60], @"chats": chats}];
+        }
+    }
+    return groups;
+}
+
 + (void)loadIfNeeded {
     if (gChats != nil) {
         return;
     }
     gChats = [NSMutableArray array];
+    gGroups = @[];
     NSData *data = [NSData dataWithContentsOfURL:[self fileURL]];
     id plist = data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:nil] : nil;
-    if (![plist isKindOfClass:NSArray.class]) {
+    // Round 13c wrote a plain list of chats; since 14 a dictionary with sections.
+    id chats = plist;
+    if ([plist isKindOfClass:NSDictionary.class]) {
+        chats = ((NSDictionary *)plist)[@"chats"];
+        gGroups = [self groupsFrom:((NSDictionary *)plist)[@"groups"]];
+    }
+    if (![chats isKindOfClass:NSArray.class]) {
         return;
     }
     NSDate *now = [NSDate date];
-    for (id item in (NSArray *)plist) {
+    for (id item in (NSArray *)chats) {
         NSDictionary *entry = [self entryFrom:item seen:now];
         if (entry) {
             [gChats addObject:entry];
@@ -79,7 +119,31 @@ static NSMutableArray<NSDictionary *> *gChats = nil;
     return [gChats copy];
 }
 
++ (NSArray<NSDictionary *> *)groups {
+    [self loadIfNeeded];
+    return gGroups;
+}
+
++ (void)setGroups:(NSArray *)groups {
+    [self loadIfNeeded];
+    NSArray<NSDictionary *> *clean = [self groupsFrom:groups];
+    if (clean.count == 0) {
+        return;
+    }
+    gGroups = clean;
+    // The chats in the sections are known chats too (kept, and searchable).
+    NSMutableArray *all = [NSMutableArray array];
+    for (NSDictionary *group in clean) {
+        [all addObjectsFromArray:group[@"chats"]];
+    }
+    [self mergeChats:all force:YES];
+}
+
 + (void)mergeChats:(NSArray *)items {
+    [self mergeChats:items force:NO];
+}
+
++ (void)mergeChats:(NSArray *)items force:(BOOL)force {
     if (![items isKindOfClass:NSArray.class] || items.count == 0) {
         return;
     }
@@ -89,7 +153,7 @@ static NSMutableArray<NSDictionary *> *gChats = nil;
     [gChats enumerateObjectsUsingBlock:^(NSDictionary *chat, NSUInteger index, BOOL *stop) {
         indexByID[chat[@"id"]] = @(index);
     }];
-    BOOL changed = NO;
+    BOOL changed = force;
     for (id item in items) {
         NSDictionary *source = [item isKindOfClass:NSDictionary.class] ? item : nil;
         NSMutableDictionary *fresh = [source mutableCopy];
@@ -139,15 +203,15 @@ static NSMutableArray<NSDictionary *> *gChats = nil;
     [self saveSoon:changed];
 }
 
-/// Written at most every few seconds (the "seen" times change at every report),
-/// at once when a name, time or the set of chats changed.
+/// Written at most every minute (the "seen" times change at every report), at
+/// once when a name, time, the set of chats or the sections changed.
 + (void)saveSoon:(BOOL)changed {
     static NSDate *lastSave = nil;
     if (!changed && lastSave != nil && -[lastSave timeIntervalSinceNow] < 60) {
         return;
     }
     lastSave = [NSDate date];
-    NSArray *snapshot = [gChats copy];
+    NSDictionary *snapshot = @{@"chats": [gChats copy], @"groups": gGroups ?: @[]};
     NSURL *url = [self fileURL];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSData *data = [NSPropertyListSerialization dataWithPropertyList:snapshot
@@ -169,15 +233,11 @@ static NSMutableArray<NSDictionary *> *gChats = nil;
 
 #pragma mark - List
 
-typedef NS_ENUM(NSInteger, ChatListSection) {
-    ChatListSectionActions = 0,
-    ChatListSectionChats = 1,
-    ChatListSectionMore = 2,
-};
-
 @implementation ChatListViewController {
-    NSArray<NSDictionary *> *_all;
-    NSArray<NSDictionary *> *_shown;
+    /// What the table shows: {title (NSString), kind ("actions", "chats", "more"), chats (NSArray)}.
+    NSArray<NSDictionary *> *_sections;
+    NSArray<NSDictionary *> *_browse;
+    NSArray<NSDictionary *> *_everyChat;
     BOOL _searching;
     NSRelativeDateTimeFormatter *_dates;
 }
@@ -201,19 +261,70 @@ typedef NS_ENUM(NSInteger, ChatListSection) {
     _dates = [[NSRelativeDateTimeFormatter alloc] init];
     _dates.unitsStyle = NSRelativeDateTimeFormatterUnitsStyleFull;
 
-    _all = [ChatListStore chats];
-    _shown = _all;
+    [self buildSections];
+    _sections = _browse;
+}
+
+/// New chat; then the sections of claude.ai's sidebar in its order (Starred, your
+/// groups, Recents), then the chats that are in none of them; then the menus.
+- (void)buildSections {
+    NSArray<NSDictionary *> *chats = [ChatListStore chats];
+    NSMutableDictionary<NSString *, NSDictionary *> *byID = [NSMutableDictionary dictionary];
+    for (NSDictionary *chat in chats) {
+        byID[chat[@"id"]] = chat;
+    }
+    NSMutableArray<NSDictionary *> *sections = [NSMutableArray array];
+    [sections addObject:@{@"kind": @"actions", @"title": @"", @"chats": @[]}];
+
+    NSMutableSet<NSString *> *placed = [NSMutableSet set];
+    NSMutableArray<NSDictionary *> *every = [NSMutableArray array];
+    for (NSDictionary *group in [ChatListStore groups]) {
+        NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
+        for (NSDictionary *item in group[@"chats"]) {
+            NSString *chatID = item[@"id"];
+            NSDictionary *known = byID[chatID];
+            NSDictionary *row = @{@"id": chatID, @"name": item[@"name"], @"updated": known[@"updated"] ?: @0};
+            [rows addObject:row];
+            if (![placed containsObject:chatID]) {
+                [placed addObject:chatID];
+                [every addObject:row];
+            }
+        }
+        NSString *title = [group[@"name"] length] ? group[@"name"] : @"Chats";
+        [sections addObject:@{@"kind": @"chats", @"title": title, @"chats": rows}];
+    }
+    NSMutableArray<NSDictionary *> *rest = [NSMutableArray array];
+    for (NSDictionary *chat in chats) {
+        if (![placed containsObject:chat[@"id"]]) {
+            [rest addObject:chat];
+            [every addObject:chat];
+        }
+    }
+    if (rest.count || placed.count == 0) {
+        [sections addObject:@{@"kind": @"chats", @"title": placed.count ? @"Other chats" : @"", @"chats": rest}];
+    }
+    [sections addObject:@{@"kind": @"more", @"title": @"", @"chats": @[]}];
+    _browse = sections;
+    _everyChat = every;
 }
 
 - (void)close {
     [self.presentingViewController dismissViewControllerAnimated:YES completion:nil];
 }
 
-/// Closes the list (and the search above it), then runs the action.
+/// A chat or New chat: the page starts on it at once while the list slides away.
+- (void)runAndClose:(void (^)(void))action {
+    if (action) {
+        action();
+    }
+    UIViewController *presenter = self.navigationController.presentingViewController ?: self.presentingViewController;
+    [presenter dismissViewControllerAnimated:YES completion:nil];
+}
+
+/// A menu: the list goes without animation so the menu opens straight away.
 - (void)closeThen:(void (^)(void))action {
     UIViewController *presenter = self.navigationController.presentingViewController ?: self.presentingViewController;
-    self.navigationItem.searchController.active = NO;
-    [presenter dismissViewControllerAnimated:YES completion:^{
+    [presenter dismissViewControllerAnimated:NO completion:^{
         if (action) {
             action();
         }
@@ -224,37 +335,51 @@ typedef NS_ENUM(NSInteger, ChatListSection) {
     NSString *query = [searchController.searchBar.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
     _searching = query.length > 0;
     if (!_searching) {
-        _shown = _all;
+        _sections = _browse;
     } else {
         NSStringCompareOptions options = NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch;
-        _shown = [_all filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *chat, NSDictionary *bindings) {
+        NSArray *hits = [_everyChat filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *chat, NSDictionary *bindings) {
             return [(NSString *)chat[@"name"] rangeOfString:query options:options].location != NSNotFound;
         }]];
+        _sections = @[@{@"kind": @"chats", @"title": @"", @"chats": hits}];
     }
     [self.tableView reloadData];
 }
 
 #pragma mark Table
 
+- (NSDictionary *)sectionAt:(NSInteger)section {
+    return _sections[(NSUInteger)section];
+}
+
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return 3;
+    return (NSInteger)_sections.count;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == ChatListSectionChats) {
-        return (NSInteger)_shown.count;
+    NSDictionary *info = [self sectionAt:section];
+    NSString *kind = info[@"kind"];
+    if ([kind isEqualToString:@"actions"]) {
+        return 1;
     }
-    if (_searching) {
-        return 0;
+    if ([kind isEqualToString:@"more"]) {
+        return 2;
     }
-    return section == ChatListSectionMore ? 2 : 1;
+    return (NSInteger)[info[@"chats"] count];
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    NSString *title = [self sectionAt:section][@"title"];
+    return title.length ? title : nil;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (section == ChatListSectionChats && _shown.count == 0) {
+    NSDictionary *info = [self sectionAt:section];
+    NSString *kind = info[@"kind"];
+    if ([kind isEqualToString:@"chats"] && [info[@"chats"] count] == 0 && [info[@"title"] length] == 0) {
         return _searching ? @"No chat with that name in the list on this phone." : @"Chats appear here once Claude has listed them.";
     }
-    if (section == ChatListSectionMore && !_searching) {
+    if ([kind isEqualToString:@"more"]) {
         return @"The list holds the chats Claude has loaded on this phone. Older chats, projects and settings are in Claude's own menu.";
     }
     return nil;
@@ -273,17 +398,20 @@ typedef NS_ENUM(NSInteger, ChatListSection) {
     cell.textLabel.numberOfLines = 1;
     cell.accessoryType = UITableViewCellAccessoryNone;
 
-    if (indexPath.section == ChatListSectionActions) {
+    NSDictionary *info = [self sectionAt:indexPath.section];
+    NSString *kind = info[@"kind"];
+    if ([kind isEqualToString:@"actions"]) {
         cell.textLabel.text = @"New chat";
         cell.textLabel.textColor = self.view.tintColor;
         cell.imageView.image = [UIImage systemImageNamed:@"square.and.pencil"];
-    } else if (indexPath.section == ChatListSectionMore) {
+    } else if ([kind isEqualToString:@"more"]) {
         BOOL appRow = indexPath.row == 1;
         cell.textLabel.text = appRow ? @"App settings" : @"Claude menu";
         cell.imageView.image = [UIImage systemImageNamed:appRow ? @"gearshape" : @"sidebar.left"];
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else {
-        NSDictionary *chat = _shown[(NSUInteger)indexPath.row];
+        NSArray<NSDictionary *> *chats = info[@"chats"];
+        NSDictionary *chat = (NSUInteger)indexPath.row < chats.count ? chats[(NSUInteger)indexPath.row] : nil;
         cell.textLabel.text = chat[@"name"];
         double updated = [chat[@"updated"] doubleValue];
         if (updated > 0) {
@@ -296,16 +424,20 @@ typedef NS_ENUM(NSInteger, ChatListSection) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (indexPath.section == ChatListSectionActions) {
-        void (^action)(void) = self.onNewChat;
-        [self closeThen:action];
-    } else if (indexPath.section == ChatListSectionMore) {
-        void (^action)(void) = indexPath.row == 1 ? self.onShowAppMenu : self.onShowClaudeMenu;
-        [self closeThen:action];
-    } else if ((NSUInteger)indexPath.row < _shown.count) {
-        NSString *chatID = _shown[(NSUInteger)indexPath.row][@"id"];
+    NSDictionary *info = [self sectionAt:indexPath.section];
+    NSString *kind = info[@"kind"];
+    if ([kind isEqualToString:@"actions"]) {
+        [self runAndClose:self.onNewChat];
+    } else if ([kind isEqualToString:@"more"]) {
+        [self closeThen:indexPath.row == 1 ? self.onShowAppMenu : self.onShowClaudeMenu];
+    } else {
+        NSArray<NSDictionary *> *chats = info[@"chats"];
+        if ((NSUInteger)indexPath.row >= chats.count) {
+            return;
+        }
+        NSString *chatID = chats[(NSUInteger)indexPath.row][@"id"];
         void (^open)(NSString *) = self.onOpenChat;
-        [self closeThen:^{
+        [self runAndClose:^{
             if (open) {
                 open(chatID);
             }

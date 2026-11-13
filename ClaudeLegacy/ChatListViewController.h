@@ -22,6 +22,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// Adds or refreshes chats from the page. Entries without a valid id are skipped.
 + (void)mergeChats:(NSArray *)items;
 
+/// The sections of claude.ai's sidebar in its order (Starred, your own groups,
+/// Recents). Each: name (NSString, may be empty), chats (array of {id, name}).
++ (NSArray<NSDictionary *> *)groups;
++ (void)setGroups:(NSArray *)groups;
+
 @end
 
 /// "Chats": search, New chat, the chats, a row that opens claude.ai's own menu
