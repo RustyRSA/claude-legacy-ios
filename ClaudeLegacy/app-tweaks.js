@@ -1331,6 +1331,8 @@
   }
   var chromeSent = "";
   var EDITOR = '[contenteditable="true"][aria-label="Write your prompt to Claude"]';
+  var DICTATION_FINISH = 'button[aria-label="Finish dictation"]';
+  var DICTATION_CANCEL = 'button[aria-label="Cancel dictation"]';
   var EFFORTS = /^(Low|Medium|High|Extra|Max)$/;
 
   function find(selector, root) {
@@ -1397,7 +1399,9 @@
   function chromeControls() {
     var c = {};
     c.editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]');
-    c.send = find('button[aria-label="Send message"]');
+    // While claude.ai dictates, its send button is replaced by "Finish dictation"
+    // and "Cancel dictation" (log 14 Nov): the box is still the same box.
+    c.send = find('button[aria-label="Send message"]') || find(DICTATION_FINISH);
     c.sidebarButton = find('button[aria-label="Show sidebar"]');
     var samePage = !!found && found.path === location.pathname;
     // The message box card found before is kept while it still holds the text
@@ -1685,7 +1689,8 @@
   // (dictated words arriving late, a draft claude.ai restored) moves to the
   // app's bar. The same text is taken once only.
   function dictating() {
-    return openSockets.some(function (ws) { return ws.readyState <= 1 && ws.__appKind === "speech_to_text"; });
+    return !!find(DICTATION_FINISH) ||
+      openSockets.some(function (ws) { return ws.readyState <= 1 && ws.__appKind === "speech_to_text"; });
   }
   var sending = false;
   var lastAdopted = "";
@@ -1909,7 +1914,10 @@
         var role = els[i].getAttribute("role");
         roles[role] = (roles[role] || 0) + 1;
         var info = menuItemInfo(els[i], i);
-        if (info.title) items.push(info);
+        // Not choices: claude.ai's own "Close" entry, and a plain entry that is
+        // a sentence (a note about plans) rather than a model or a submenu.
+        var note = role === "menuitem" && !info.sub && (info.title === "Close" || info.title.length > 30);
+        if (info.title && !note) items.push(info);
       }
       record("chrome", name + " menu: " + items.length + " items (" + Object.keys(roles).map(function (r) {
         return roles[r] + " " + r;
@@ -2100,12 +2108,15 @@
         case "plus": result = press(find('button[aria-label="Add files, connectors, and more"]'), "+ button"); break;
         case "model": result = press(find('button[aria-label^="Model:"]'), "model button"); break;
         case "dictate":
-          // Starts or stops claude.ai's dictation (its button toggles). Its box
-          // stays hidden: the words it writes there move to the app's bar
-          // (adoptStrayText), and the app's mic button shows that it listens.
+          // Starts claude.ai's dictation. Its box stays hidden; the app's bar
+          // shows that it listens and offers finish and cancel, which press
+          // claude.ai's "Finish dictation" / "Cancel dictation". The words
+          // claude.ai then writes into its box move to the app's bar
+          // (adoptStrayText).
           result = press(find('button[aria-label="Dictate"]'), "dictate button");
-          record("chrome", "dictate pressed" + (dictating() ? " (to stop)" : ""));
           break;
+        case "dictateFinish": result = press(find(DICTATION_FINISH), "finish dictation button"); break;
+        case "dictateCancel": result = press(find(DICTATION_CANCEL), "cancel dictation button"); break;
         case "voice":
           // claude.ai's box is shown first, so its voice screen opens where it
           // can be seen.

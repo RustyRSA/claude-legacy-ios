@@ -181,6 +181,27 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(st.posted.filter((m) => m.dictated === "late words").length, 1, "handed over once");
   assert.ok(!/late words/.test(st.w.__appDebugLog()), "the text stays out of the debug log");
 
+  // Dictation: claude.ai swaps its send button for finish / cancel. The box stays
+  // hidden, the app is told it is listening, and finish / cancel press claude.ai's.
+  const dc = page(HEADER + SIDEBAR + COMPOSER);
+  await new Promise((res) => setTimeout(res, 50));
+  const dd = dc.w.document;
+  const sendButton = dd.querySelector('[aria-label="Send message"]');
+  sendButton.setAttribute("aria-label", "Finish dictation");
+  const cancel = dd.createElement("button");
+  cancel.setAttribute("aria-label", "Cancel dictation");
+  dd.querySelector("fieldset").appendChild(cancel);
+  await new Promise((res) => setTimeout(res, 300));
+  const ds = dc.posted[dc.posted.length - 1];
+  assert.strictEqual(ds.ready, true, "still in use while dictating");
+  assert.strictEqual(ds.dictating, true);
+  assert.strictEqual(ds.composerShown, false, "claude.ai's box is not shown for dictation");
+  assert.ok(dd.querySelector("fieldset").hasAttribute("data-app-collapsed"));
+  assert.strictEqual(dc.w.__appChrome.run("dictateCancel"), "ok");
+  assert.strictEqual(dc.clicks[dc.clicks.length - 1], "Cancel dictation");
+  assert.strictEqual(dc.w.__appChrome.run("dictateFinish"), "ok");
+  assert.strictEqual(dc.clicks[dc.clicks.length - 1], "Finish dictation");
+
   // The sidebar's sections: small text buttons are headings, links are chats; a
   // row that is a button (32 px) is not a heading.
   const GA = "4407ad06-cdee-427d-ae9c-fb9a4db6c0d9", GB = "5681ff6f-e872-4539-91f3-c38fb5bc04e1", GC = "172b4950-1441-4bd4-9e21-0dfb407689e7";
@@ -221,7 +242,8 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
     menu.innerHTML = '<div role="group" aria-label="Models"><div role="menuitemradio" aria-checked="true">\uE123 Opus 5.5</div>' +
       '<div role="menuitemradio" aria-checked="false">Sonnet 5.5</div></div>' +
       '<div role="menuitemradio" aria-checked="true">Extra</div>' +
-      '<div role="menuitem" aria-haspopup="menu">More models</div>';
+      '<div role="menuitem" aria-haspopup="menu">More models</div>' +
+      '<div role="menuitem">Fable is included in Max and Team plans</div><div role="menuitem">Close</div>';
     menu.addEventListener("click", (e) => { picked = e.target.textContent; menu.remove(); });
     md.body.appendChild(menu);
   });

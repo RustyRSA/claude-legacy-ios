@@ -362,6 +362,7 @@ API_AVAILABLE(ios(15.0))
     NSUInteger _waitToken;
     BOOL _streaming;
     BOOL _voice;
+    BOOL _dictating;
     BOOL _refocusAfterSend;
 }
 
@@ -582,10 +583,13 @@ API_AVAILABLE(ios(15.0))
         __block NSString *runTitle = @"";
         void (^closeRun)(void) = ^{
             if (run.count) {
+                // The current choices and the effort levels sit in the menu itself;
+                // any other group of claude.ai's ("More models") is a submenu.
+                BOOL inlineRun = runTitle.length == 0 || [runTitle isEqualToString:@"Effort"];
                 [elements addObject:[UIMenu menuWithTitle:runTitle
                                                     image:nil
                                                 identifier:nil
-                                                   options:UIMenuOptionsDisplayInline
+                                                   options:inlineRun ? UIMenuOptionsDisplayInline : 0
                                                   children:[run copy]]];
                 [run removeAllObjects];
             }
@@ -754,7 +758,13 @@ static const CGFloat kMessageBarHeight = 80;
     UIColor *background;
     UIColor *tint;
     NSString *label;
-    if (_streaming) {
+    if (_dictating) {
+        _actionName = @"dictateFinish";
+        image = SymbolImage(@"checkmark", 15, UIImageSymbolWeightBold);
+        background = self.tintColor;
+        tint = UIColor.whiteColor;
+        label = @"Finish dictation";
+    } else if (_streaming) {
         _actionName = @"stop";
         image = SymbolImage(@"stop.fill", 13, UIImageSymbolWeightRegular);
         background = UIColor.labelColor;
@@ -816,10 +826,14 @@ static const CGFloat kMessageBarHeight = 80;
     _moreButton.hidden = !inChat;
     _moreButton.enabled = [state[@"more"] boolValue];
     _micButton.enabled = [state[@"dictate"] boolValue];
+    // While claude.ai dictates: the mic becomes cancel (red x), the action
+    // button becomes finish (tick), the field says it is listening.
     BOOL dictating = [state[@"dictating"] boolValue];
-    [_micButton setImage:SymbolImage(dictating ? @"mic.fill" : @"mic", 19, UIImageSymbolWeightRegular) forState:UIControlStateNormal];
+    _dictating = dictating;
+    _micButton.enabled = dictating || [state[@"dictate"] boolValue];
+    [_micButton setImage:SymbolImage(dictating ? @"xmark" : @"mic", 19, UIImageSymbolWeightRegular) forState:UIControlStateNormal];
     _micButton.tintColor = dictating ? UIColor.systemRedColor : UIColor.secondaryLabelColor;
-    _micButton.accessibilityLabel = dictating ? @"Stop dictating" : @"Dictate";
+    _micButton.accessibilityLabel = dictating ? @"Cancel dictation" : @"Dictate";
     _placeholder.text = dictating ? @"Listening…" : @"Message";
     NSString *model = [state[@"model"] isKindOfClass:NSString.class] ? state[@"model"] : @"";
     NSString *effort = [state[@"effort"] isKindOfClass:NSString.class] ? state[@"effort"] : @"";
@@ -889,7 +903,7 @@ static const CGFloat kMessageBarHeight = 80;
     [_textView resignFirstResponder];
     [self fire:@"model" argument:nil];
 }
-- (void)micTapped { [self fire:@"dictate" argument:nil]; }
+- (void)micTapped { [self fire:_dictating ? @"dictateCancel" : @"dictate" argument:nil]; }
 - (void)actionTapped {
     if ([_actionName isEqualToString:@"send"]) {
         NSString *text = [self trimmedText];
@@ -899,6 +913,8 @@ static const CGFloat kMessageBarHeight = 80;
         _refocusAfterSend = _textView.isFirstResponder;
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
         [self fire:@"send" argument:text];
+    } else if ([_actionName isEqualToString:@"dictateFinish"]) {
+        [self fire:_actionName argument:nil]; // the keyboard stays: the words come to this bar
     } else {
         [_textView resignFirstResponder];
         [self fire:_actionName argument:nil];

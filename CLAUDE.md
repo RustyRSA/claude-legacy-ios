@@ -311,6 +311,24 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   removed from titles (`plainText`); the log line lists group, title, submenu and
   checked for each item.
 - Voice mode still claude.ai's own screen.
+- Installed 14 Nov (`593e99c`); first log pulled with `tools/pull-log.sh` (works).
+  - Early box is a `textarea` stand-in (`textarea….w-full.max-h-96 291x32`), hidden at
+    0.2 s by `earlyField()`; Logan no longer sees the box at launch.
+  - Model menu as read: 4 current models, `[Effort]` Low … Max, group "More models"
+    with 9 older models (all `menuitemradio`), then two `menuitem`s: a note ("Fable is
+    included in Max and …") and "Close".
+  - Dictation: claude.ai replaces "Send message" by `Finish dictation` and
+    `Cancel dictation` buttons (also `Manual` / `Auto` buttons appear); the app took
+    the missing send button for "not ready" and showed claude.ai's box.
+
+### Round 18 (14 Nov 2026) — native dictation controls
+- "Finish dictation" counts as the send button while it is there, so the box stays
+  hidden and collapsed; `dictating` = that button present or a speech_to_text socket
+  open. Native bar while dictating: field says "Listening…", the mic becomes a red x
+  (`dictateCancel`), the action button a tick (`dictateFinish`); the words then move
+  to the native bar as before.
+- Model menu: "Close" and the plan note are left out; "More models" is a submenu,
+  current models and "Effort" stay in the menu itself.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
