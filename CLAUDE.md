@@ -346,6 +346,19 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   "message box" went missing and the app stepped aside. While "Finish dictation" is
   there the card needs no text box (`c.dictation`), and the page is not searched again
   for every change of the sound display.
+- Installed 14 Nov (`bef787c`). Logan: dictation works; claude.ai's UI still flashes
+  at every launch. The log shows nothing more (stand-in hidden at 0.2 s, ready 2.2 s).
+
+### Round 20 (14 Nov 2026) — page covered while it loads
+- Four rounds of hiding claude.ai's early boxes one by one did not stop the flash, and
+  the log cannot show what is on screen. Instead the page is covered: `NativeChrome`
+  has a plain view (page colour, spinner) between the two bars, shown at launch when
+  the bars are (`-coverPage` from `-showWhileLoading`) and on every full page load
+  (`didCommitNavigation`), and faded out when the page reports the app's controls in
+  use, a page the bars are not for, or after 8 s. Not used for brief "not ready"
+  moments in a running page. The per-element hiding (rounds 16–19) stays underneath.
+- Dictation: what claude.ai has written so far (`dictationText`, last 80 characters)
+  shows in the native field while it listens.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,

@@ -1808,6 +1808,9 @@
       voice: !!find('button[aria-label="Use voice mode"]'),
       dictate: !!find('button[aria-label="Dictate"]'),
       dictating: dictating(),
+      // What claude.ai has written so far while it dictates (its end), shown in
+      // the app's field; never logged.
+      dictationText: dictating() && c.editor ? String(c.editor.textContent || "").trim().slice(-80) : "",
       incognito: !!find('button[aria-label="Use incognito"]'),
       more: !!c.more
     };

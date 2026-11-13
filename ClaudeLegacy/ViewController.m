@@ -321,6 +321,11 @@ API_AVAILABLE(ios(15.0))
 /// At launch, when the controls were in use last time: shown at once, with the
 /// buttons off until the page reports.
 - (void)showWhileLoading;
+/// Covers the page between the bars (plain background and a spinner) until the
+/// page reports that the app's controls are in use: while claude.ai loads it
+/// draws its own message box several times over, in different places, and
+/// hiding each of those in time proved unreliable (rounds 16–19). At most 8 s.
+- (void)coverPage;
 /// The model button's native menu: asks for claude.ai's menu items
 /// ({index, title, subtitle, checked, disabled, sub}; none = show claude.ai's
 /// own menu, nil = it is already showing), and reports the item picked.
@@ -357,6 +362,9 @@ API_AVAILABLE(ios(15.0))
     NSArray<UIButton *> *_buttons;
     BOOL _composerShown;
     CGFloat _reportedInset;
+    UIView *_curtain;
+    UIActivityIndicatorView *_spinner;
+    NSUInteger _coverToken;
     BOOL _shown;
     BOOL _waiting;
     NSUInteger _waitToken;
@@ -558,6 +566,25 @@ API_AVAILABLE(ios(15.0))
         [_actionButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
         [_actionButton.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor constant:-2],
     ]];
+    // The cover for the page while it loads, under the bars.
+    _curtain = [[UIView alloc] init];
+    _curtain.translatesAutoresizingMaskIntoConstraints = NO;
+    _curtain.backgroundColor = AppBackgroundColor();
+    _curtain.hidden = YES;
+    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    _spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [_curtain addSubview:_spinner];
+    [self insertSubview:_curtain atIndex:0];
+    [NSLayoutConstraint activateConstraints:@[
+        [_curtain.topAnchor constraintEqualToAnchor:_topBar.bottomAnchor],
+        [_curtain.bottomAnchor constraintEqualToAnchor:_bottomBar.topAnchor],
+        [_curtain.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [_curtain.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [_spinner.centerXAnchor constraintEqualToAnchor:_curtain.centerXAnchor],
+        [_spinner.centerYAnchor constraintEqualToAnchor:_curtain.centerYAnchor],
+        [_placeholder.trailingAnchor constraintLessThanOrEqualToAnchor:_micButton.leadingAnchor],
+    ]];
+
     // Not the chat list button: the list works while the page still loads.
     _buttons = @[_incognitoButton, _newChatButton, _moreButton, _modelButton, _plusButton, _micButton, _actionButton];
     [self updateActionButton];
@@ -667,6 +694,7 @@ static const CGFloat kMessageBarHeight = 80;
         typeof(self) strongSelf = weakSelf;
         if (strongSelf && strongSelf->_waiting && strongSelf->_waitToken == token) {
             strongSelf->_waiting = NO;
+            [strongSelf uncoverPage];
             [strongSelf setShown:NO];
         }
     });
@@ -689,6 +717,41 @@ static const CGFloat kMessageBarHeight = 80;
     self.alpha = 1;
     [self beginWaiting];
     [self reportInset];
+    [self coverPage];
+}
+
+- (void)coverPage {
+    if (!_shown || _composerShown) {
+        return;
+    }
+    [_curtain.layer removeAllAnimations];
+    _curtain.alpha = 1;
+    _curtain.hidden = NO;
+    [_spinner startAnimating];
+    NSUInteger token = ++_coverToken;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf && strongSelf->_coverToken == token) {
+            [strongSelf uncoverPage];
+        }
+    });
+}
+
+- (void)uncoverPage {
+    if (_curtain.hidden) {
+        return;
+    }
+    NSUInteger token = ++_coverToken;
+    // A moment for the page to draw with claude.ai's controls already hidden.
+    [UIView animateWithDuration:0.2 delay:0.1 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+        self->_curtain.alpha = 0;
+    } completion:^(BOOL finished) {
+        if (self->_coverToken == token) {
+            self->_curtain.hidden = YES;
+            [self->_spinner stopAnimating];
+        }
+    }];
 }
 
 - (void)setShown:(BOOL)show {
@@ -730,6 +793,7 @@ static const CGFloat kMessageBarHeight = 80;
 - (void)setTopColor:(UIColor *)top bottomColor:(UIColor *)bottom dark:(BOOL)dark {
     _topBar.backgroundColor = top;
     _bottomBar.backgroundColor = bottom;
+    _curtain.backgroundColor = top;
     self.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
 }
 
@@ -813,6 +877,7 @@ static const CGFloat kMessageBarHeight = 80;
         return;
     }
     [self endWaiting];
+    [self uncoverPage]; // in use, or a page the bars are not for
     if (ready) {
         [self coverTopHeight:[state[@"topHeight"] doubleValue] viewWidth:[state[@"viewWidth"] doubleValue]];
     }
@@ -834,7 +899,9 @@ static const CGFloat kMessageBarHeight = 80;
     [_micButton setImage:SymbolImage(dictating ? @"xmark" : @"mic", 19, UIImageSymbolWeightRegular) forState:UIControlStateNormal];
     _micButton.tintColor = dictating ? UIColor.systemRedColor : UIColor.secondaryLabelColor;
     _micButton.accessibilityLabel = dictating ? @"Cancel dictation" : @"Dictate";
-    _placeholder.text = dictating ? @"Listening…" : @"Message";
+    NSString *heard = [state[@"dictationText"] isKindOfClass:NSString.class] ? state[@"dictationText"] : @"";
+    _placeholder.text = dictating ? (heard.length ? heard : @"Listening…") : @"Message";
+    _placeholder.lineBreakMode = dictating ? NSLineBreakByTruncatingHead : NSLineBreakByTruncatingTail;
     NSString *model = [state[@"model"] isKindOfClass:NSString.class] ? state[@"model"] : @"";
     NSString *effort = [state[@"effort"] isKindOfClass:NSString.class] ? state[@"effort"] : @"";
     [self setModel:model effort:effort];
@@ -2734,6 +2801,9 @@ static const CGFloat kMessageBarHeight = 80;
 
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
     self.chromeReady = NO; // a new page: its controls are not found yet
+    if (@available(iOS 15.0, *)) {
+        [(NativeChrome *)self.nativeChrome coverPage]; // only when the bars are up
+    }
     if ([self isLoadingOverlayVisible] && self.modulesDone == 0) {
         [self.loadingOverlay setStage:@"Loading page" detail:webView.URL.path];
         [self noteActivity];
