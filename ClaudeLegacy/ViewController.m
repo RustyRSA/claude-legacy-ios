@@ -576,10 +576,29 @@ API_AVAILABLE(ios(15.0))
             return;
         }
         NSMutableArray<UIMenuElement *> *elements = [NSMutableArray array];
+        // Items of one section (claude.ai's own group, or "Effort") follow each
+        // other; each run becomes a titled part of the menu.
+        NSMutableArray<UIMenuElement *> *run = [NSMutableArray array];
+        __block NSString *runTitle = @"";
+        void (^closeRun)(void) = ^{
+            if (run.count) {
+                [elements addObject:[UIMenu menuWithTitle:runTitle
+                                                    image:nil
+                                                identifier:nil
+                                                   options:UIMenuOptionsDisplayInline
+                                                  children:[run copy]]];
+                [run removeAllObjects];
+            }
+        };
         for (NSDictionary *item in items) {
             NSString *title = [item[@"title"] isKindOfClass:NSString.class] ? item[@"title"] : @"";
             if (title.length == 0) {
                 continue;
+            }
+            NSString *group = [item[@"group"] isKindOfClass:NSString.class] ? item[@"group"] : @"";
+            if (![group isEqualToString:runTitle]) {
+                closeRun();
+                runTitle = group;
             }
             UIAction *action = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__kindof UIAction *chosen) {
                 if (weakSelf.onMenuPick) {
@@ -597,8 +616,9 @@ API_AVAILABLE(ios(15.0))
             if ([item[@"disabled"] boolValue]) {
                 action.attributes = UIMenuElementAttributesDisabled;
             }
-            [elements addObject:action];
+            [run addObject:action];
         }
+        closeRun();
         if (elements.count == 0) {
             [elements addObject:[UIAction actionWithTitle:@"Show Claude's menu" image:nil identifier:nil handler:^(__kindof UIAction *chosen) {
                 [weakSelf fire:menu argument:nil];
@@ -796,6 +816,11 @@ static const CGFloat kMessageBarHeight = 80;
     _moreButton.hidden = !inChat;
     _moreButton.enabled = [state[@"more"] boolValue];
     _micButton.enabled = [state[@"dictate"] boolValue];
+    BOOL dictating = [state[@"dictating"] boolValue];
+    [_micButton setImage:SymbolImage(dictating ? @"mic.fill" : @"mic", 19, UIImageSymbolWeightRegular) forState:UIControlStateNormal];
+    _micButton.tintColor = dictating ? UIColor.systemRedColor : UIColor.secondaryLabelColor;
+    _micButton.accessibilityLabel = dictating ? @"Stop dictating" : @"Dictate";
+    _placeholder.text = dictating ? @"Listening…" : @"Message";
     NSString *model = [state[@"model"] isKindOfClass:NSString.class] ? state[@"model"] : @"";
     NSString *effort = [state[@"effort"] isKindOfClass:NSString.class] ? state[@"effort"] : @"";
     [self setModel:model effort:effort];
@@ -1839,15 +1864,42 @@ static const CGFloat kMessageBarHeight = 80;
     [defaults setObject:log forKey:kEventLogKey];
 }
 
-- (void)copyDebugLog {
+/// The whole debug log (app part and page part) as text.
+- (void)debugLogText:(void (^)(NSString *text))completion {
     NSString *header = [self nativeDebugSummary];
-    __weak typeof(self) weakSelf = self;
     [self.webView evaluateJavaScript:@"window.__appDebugLog ? window.__appDebugLog() : 'page log unavailable'"
                    completionHandler:^(id result, NSError *error) {
         NSString *pageLog = [result isKindOfClass:NSString.class]
             ? result
             : [NSString stringWithFormat:@"(could not read page log: %@)", error.localizedDescription];
-        UIPasteboard.generalPasteboard.string = [NSString stringWithFormat:@"%@\n%@", header, pageLog];
+        completion([NSString stringWithFormat:@"%@\n%@", header, pageLog]);
+    }];
+}
+
+/// The debug log as a file in the app's Documents folder (debug-log.txt), so it
+/// can be fetched from the PC over SSH (tools/pull-log.sh) instead of being
+/// copied and sent by hand. Written whenever the app goes to the background and
+/// when the log is copied. Same content as the copied log: no message text.
+- (void)saveDebugLogFileThen:(void (^)(void))done {
+    [self debugLogText:^(NSString *text) {
+        NSURL *documents = [[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
+                                                                 inDomains:NSUserDomainMask] firstObject];
+        [NSFileManager.defaultManager createDirectoryAtURL:documents withIntermediateDirectories:YES attributes:nil error:nil];
+        NSURL *file = [documents URLByAppendingPathComponent:@"debug-log.txt"];
+        NSString *stamped = [NSString stringWithFormat:@"saved %@\n%@", [NSDate date], text];
+        [stamped writeToURL:file atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [file setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+        if (done) {
+            done();
+        }
+    }];
+}
+
+- (void)copyDebugLog {
+    __weak typeof(self) weakSelf = self;
+    [self saveDebugLogFileThen:nil];
+    [self debugLogText:^(NSString *text) {
+        UIPasteboard.generalPasteboard.string = text;
 
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) {
@@ -2132,6 +2184,7 @@ static const CGFloat kMessageBarHeight = 80;
 
 - (void)sceneDidEnterBackground:(NSNotification *)notification {
     [self logEvent:@"app went to the background"];
+    [self saveDebugLogFileThen:nil];
     // Save cookies before iOS suspends the app; ask for a few seconds to do it.
     __block UIBackgroundTaskIdentifier task = UIBackgroundTaskInvalid;
     task = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"Save session" expirationHandler:^{

@@ -175,6 +175,8 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   await new Promise((res) => setTimeout(res, 50));
   st.w.document.querySelector('[contenteditable]').textContent = "late words";
   await new Promise((res) => setTimeout(res, 300));
+  assert.ok(!st.posted.some((m) => m.dictated), "not taken while it may still be changing");
+  await new Promise((res) => setTimeout(res, 1700));
   assert.ok(st.posted.some((m) => m.dictated === "late words"), "stray text handed to the app");
   assert.strictEqual(st.posted.filter((m) => m.dictated === "late words").length, 1, "handed over once");
   assert.ok(!/late words/.test(st.w.__appDebugLog()), "the text stays out of the debug log");
@@ -216,15 +218,18 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
     if (open) { open.remove(); return; }
     const menu = md.createElement("div");
     menu.setAttribute("role", "menu");
-    menu.innerHTML = '<div role="menuitemradio" aria-checked="true">Opus 5.5</div><div role="menuitemradio" aria-checked="false">Sonnet 5.5</div>' +
+    menu.innerHTML = '<div role="group" aria-label="Models"><div role="menuitemradio" aria-checked="true">\uE123 Opus 5.5</div>' +
+      '<div role="menuitemradio" aria-checked="false">Sonnet 5.5</div></div>' +
+      '<div role="menuitemradio" aria-checked="true">Extra</div>' +
       '<div role="menuitem" aria-haspopup="menu">More models</div>';
     menu.addEventListener("click", (e) => { picked = e.target.textContent; menu.remove(); });
     md.body.appendChild(menu);
   });
   const listed = JSON.parse(await chat.w.__appChrome.run("menuItems", "model"));
-  assert.deepStrictEqual(listed.map((i) => i.title), ["Opus 5.5", "Sonnet 5.5", "More models"]);
+  assert.deepStrictEqual(listed.map((i) => i.title), ["Opus 5.5", "Sonnet 5.5", "Extra", "More models"], "icon characters left out");
+  assert.deepStrictEqual(listed.map((i) => i.group), ["Models", "Models", "Effort", ""]);
   assert.strictEqual(listed[0].checked, true);
-  assert.strictEqual(listed[2].sub, true);
+  assert.strictEqual(listed[3].sub, true);
   assert.ok(!md.querySelector('[role="menu"]'), "claude.ai's menu closed again");
   assert.ok(!md.documentElement.classList.contains("app-menu-quiet"), "menus visible again");
   assert.strictEqual(await chat.w.__appChrome.run("menuPick", "model\n1\nSonnet 5.5"), "ok");

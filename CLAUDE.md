@@ -281,6 +281,36 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   `PATH="/c/WINDOWS/System32/OpenSSH:$PATH" bash tools/update.sh --build-only`.
   (While the key is in that agent, anything running as Logan on the PC can reach the
   phone as root without the passphrase; `ssh-add -d` takes it out.)
+- Installed 14 Nov (`9b91dc8`, by Claude over SSH). Logan: send button fixed; the
+  message box still shows mid-screen at launch (so the early box is not the
+  `contenteditable` the hide looks for); dictation should not show claude.ai's box at
+  all; model menu works but mixes models and effort levels and shows stray emoji /
+  unsupported symbols; greeting: leave as claude.ai has it. Aim restated: parity with
+  the official app, done natively.
+
+### Round 17 (14 Nov 2026) — log file, earlier hide, native dictation, menu sections
+- **Debug log without relaying it by hand:** the app writes the whole log to
+  `Documents/debug-log.txt` in its data folder whenever it goes to the background (and
+  on Copy debug log). `tools/pull-log.sh` fetches the newest one into `phone-logs/`:
+  `PATH="/c/WINDOWS/System32/OpenSSH:$PATH" bash tools/pull-log.sh`. So: Logan uses the
+  app, goes to the home screen, says so; Claude pulls the log.
+- Early hide, three ways: (1) the message box card's tag + exact class list is saved
+  per page kind at ready (`localStorage.__appEarlyBox`) and a style hides anything
+  matching it from document start of the next launch (removed when the real marks are
+  set, 6 s at most); (2) `earlyField()`: any visible `textarea`, `[role=textbox]`,
+  `[contenteditable]`, `[data-placeholder]` outside the sidebar counts as the early
+  box; (3) `launch probe` log lines at 0.6 / 1.1 / 1.7 s name the elements in the
+  middle of the page while the app is not ready, to find the box if both miss.
+- Dictation is native: the mic toggles claude.ai's Dictate button, claude.ai's box
+  stays hidden, the mic turns red and the placeholder says "Listening…" while a
+  speech_to_text socket is open (`dictating` in the state); the words move to the
+  native bar once they have stopped changing for 0.7 s and dictation is over. Stopping
+  relies on claude.ai's button being a toggle (unverified).
+- Model menu: items grouped by claude.ai's own `[role=group]` label, else effort
+  levels under "Effort" (inline titled sections); icon-font and pictographic characters
+  removed from titles (`plainText`); the log line lists group, title, submenu and
+  checked for each item.
+- Voice mode still claude.ai's own screen.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
