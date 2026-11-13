@@ -109,13 +109,15 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(await pp.w.__appChrome.run("send", "x".repeat(2500)), "ok");
   assert.strictEqual(pp.w.__typed.length, 2500);
 
-  // A missing control: nothing hidden, the app keeps claude.ai's own controls.
+  // A missing control: the app is not in use and claude.ai's top bar stays; only
+  // the message box is hidden for its first 6 s (its buttons usually follow).
   const q = page(HEADER + '<div contenteditable="true" aria-label="Write your prompt to Claude"></div>');
   await new Promise((r) => setTimeout(r, 50));
   const s2 = q.posted[q.posted.length - 1];
   assert.strictEqual(s2.ready, false);
   assert.ok(/send button/.test(s2.why), s2.why);
-  assert.ok(!q.w.document.querySelector("[data-app-hidden]"), "nothing hidden");
+  assert.deepStrictEqual(Array.from(q.w.document.querySelectorAll("[data-app-hidden]")).map((el) => el.getAttribute("aria-label")),
+    ["Write your prompt to Claude"], "only the message box hidden, for now");
   assert.ok(/native controls: on, not in use \(missing/.test(q.w.__appDebugLog()), "reason in the debug log");
 
   // A chat: the top bar's buttons sit in two separate parts of the layout (title
@@ -160,6 +162,22 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   const ve = v.posted[v.posted.length - 1];
   assert.strictEqual(ve.composerShown, false, "back to the app's bar after voice mode");
   assert.ok(vd.querySelector("fieldset").hasAttribute("data-app-collapsed"));
+
+  // claude.ai's text box without its buttons yet: hidden already, app not ready.
+  const e = page(HEADER + SIDEBAR + '<fieldset id="early"><div contenteditable="true" aria-label="Write your prompt to Claude"></div></fieldset>');
+  await new Promise((res) => setTimeout(res, 50));
+  assert.strictEqual(e.posted[e.posted.length - 1].ready, false);
+  assert.ok(e.w.document.querySelector('[contenteditable]').closest("[data-app-hidden]"), "message box hidden before its buttons");
+  assert.ok(!e.w.document.querySelector('[aria-label="Use incognito"]').closest("[data-app-hidden]"), "nothing else hidden yet");
+
+  // Text that turns up in claude.ai's hidden box goes to the app's bar, once.
+  const st = page(HEADER + SIDEBAR + COMPOSER);
+  await new Promise((res) => setTimeout(res, 50));
+  st.w.document.querySelector('[contenteditable]').textContent = "late words";
+  await new Promise((res) => setTimeout(res, 300));
+  assert.ok(st.posted.some((m) => m.dictated === "late words"), "stray text handed to the app");
+  assert.strictEqual(st.posted.filter((m) => m.dictated === "late words").length, 1, "handed over once");
+  assert.ok(!/late words/.test(st.w.__appDebugLog()), "the text stays out of the debug log");
 
   // The sidebar's sections: small text buttons are headings, links are chats; a
   // row that is a button (32 px) is not a heading.

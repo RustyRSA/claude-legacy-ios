@@ -250,7 +250,37 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   shows closed keeps the items last seen; section headings are buttons that close /
   open the section (`ChatListCollapsedSections`); symbols this iOS has no glyph for
   (newer emoji) are left out of names (`ReadableText`, CoreText last-resort check).
-- Not checked on device yet.
+- Installed 13 Nov (`243208f`). Video of a launch + log 13 Nov 19:36:
+  - claude.ai draws its message box (text box, placeholder) about 1 s before the box's
+    buttons; the hide waited for the send button, so the box showed mid-screen, then at
+    the bottom, for that second ("its presence is still there").
+  - Start page greeting sits left-aligned in the upper third: that is claude.ai's own
+    phone layout once its box is at the bottom (the box-in-the-middle layout before it
+    is centred), not something the app moves.
+  - Send button was a blank white circle: `UIColor.tintColor` as a background follows
+    the button's own tint, which is the white of its arrow.
+  - Dictated words arrived 3.7 s after dictation stopped, after the native bar was back:
+    they sat in claude.ai's hidden box and the next typed send replaced them.
+  - New chat -> chat page: "top bar none" (searched before claude.ai drew it, never again).
+  - Voice mode: repeated "uncaught Script error." while the voice socket is open; not
+    looked into. Native text shows in small caps again (A-Font tweak, also on the home
+    screen), not the app.
+  - No `model menu:` line: the native model menu was not tried in that session.
+
+### Round 16 (14 Nov 2026)
+- Message box hidden from the moment its text box exists (`earlyBox`, up to 6 s
+  without its buttons, then shown again); app still "not ready" until the buttons come.
+- Send button: background and voice tint from the bar's `tintColor`.
+- Dictation: after it stops the words are waited for (until text is there, 6 s at
+  most). Any text that turns up in claude.ai's hidden box while the native bar is in
+  use moves to the native bar once (`adoptStrayText`; not during a send).
+- Top bar looked for again (8 times, 0.7 s apart) when none was found with the message
+  box there.
+- Installing from Claude Code: Logan's key is in the Windows OpenSSH agent (service
+  `ssh-agent`), which Git Bash's own ssh cannot use. Put Windows' ssh first:
+  `PATH="/c/WINDOWS/System32/OpenSSH:$PATH" bash tools/update.sh --build-only`.
+  (While the key is in that agent, anything running as Logan on the PC can reach the
+  phone as root without the passphrase; `ssh-add -d` takes it out.)
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,

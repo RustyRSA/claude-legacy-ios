@@ -743,14 +743,16 @@ static const CGFloat kMessageBarHeight = 80;
     } else if (hasText || !_voice) {
         _actionName = @"send";
         image = SymbolImage(@"arrow.up", 15, UIImageSymbolWeightBold);
-        background = hasText ? UIColor.tintColor : UIColor.tertiarySystemFillColor;
+        // The bar's own tint: UIColor.tintColor would follow this button's tint,
+        // which is the white of its arrow (a blank white circle, 13 Nov).
+        background = hasText ? self.tintColor : UIColor.tertiarySystemFillColor;
         tint = hasText ? UIColor.whiteColor : UIColor.tertiaryLabelColor;
         label = @"Send";
     } else {
         _actionName = @"voice";
         image = SymbolImage(@"waveform", 19, UIImageSymbolWeightRegular);
         background = UIColor.clearColor;
-        tint = UIColor.tintColor;
+        tint = self.tintColor;
         label = @"Voice mode";
     }
     [_actionButton setImage:image forState:UIControlStateNormal];

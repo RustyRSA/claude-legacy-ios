@@ -1363,7 +1363,11 @@
       if (box) c.composer = wholeControl(box, box.getBoundingClientRect().height + 60);
     }
     var searched = false; // the page was searched for the top bar with its message box there
-    if (samePage && stillThere(found.topBar) && (found.searched || !c.composer)) {
+    // No top bar found with the message box already there (a chat just
+    // created): looked for again a few times, 0.7 s apart.
+    var lookAgain = samePage && !!c.composer && !!found.searched && found.topBar.length === 0 &&
+      (found.emptyTries || 0) < 8 && performance.now() - (found.searchedAt || 0) > 700;
+    if (samePage && !lookAgain && stillThere(found.topBar) && (found.searched || !c.composer)) {
       c.topBar = found.topBar;
       c.topHeight = found.topHeight;
       searched = !!found.searched;
@@ -1394,7 +1398,8 @@
     }
     if (c.composer || (found && c.topBar !== found.topBar)) {
       if (!found || found.composer !== c.composer || found.topBar !== c.topBar || found.path !== location.pathname) {
-        found = { path: location.pathname, editor: c.editor, composer: c.composer, topBar: c.topBar, topHeight: c.topHeight, searched: searched };
+        found = { path: location.pathname, editor: c.editor, composer: c.composer, topBar: c.topBar, topHeight: c.topHeight, searched: searched,
+          searchedAt: performance.now(), emptyTries: samePage ? (found.emptyTries || 0) + 1 : 0 };
       } else {
         found.editor = c.editor;
       }
@@ -1409,7 +1414,12 @@
   function chromeStale() {
     if (pageKind() === "other") return false;
     if (!found || !found.composer) {
-      return !!find('button[aria-label="Send message"]') && !!find(EDITOR);
+      var editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]');
+      if (!editor) return false;
+      if (find('button[aria-label="Send message"]')) return true;
+      // The text box is drawn about a second before its buttons (video 13 Nov):
+      // it is hidden then already (see earlyBox in updateChrome).
+      return hiddenNow.length === 0 && (!earlySince || performance.now() - earlySince < EARLY_MS);
     }
     return found.path !== location.pathname || !found.composer.isConnected ||
       !found.editor || !found.editor.isConnected || !stillThere(found.topBar);
@@ -1559,7 +1569,11 @@
     var age = now - takeover.since;
     var settled = idle && !!c.editor && !!c.send && now - takeover.idleSince > 600;
     var over = location.pathname !== takeover.path ||
-      (settled && (takeover.busy ? (!voice || empty) : (empty && age > 5000)));
+      (settled && (takeover.busy
+        // Dictated words arrive up to a few seconds after dictation stops
+        // (3.7 s in the log of 13 Nov): waited for, 6 s at most.
+        ? (voice ? empty : (!empty || now - takeover.idleSince > 6000))
+        : (empty && age > 5000)));
     if (!over) return true;
     if (!voice && takeover.busy && !empty && c.editor) {
       // The dictated words move to the app's message bar.
@@ -1570,6 +1584,43 @@
       (takeover.busy ? "" : " (never seen starting)") + (dictated ? ", " + dictated.length + " characters to the app" : ""));
     takeover = null;
     return false;
+  }
+
+  // claude.ai draws its message box about a second before the box's buttons;
+  // until those are there the app cannot use it, but it is hidden from the
+  // moment it appears (for at most 6 s, in case the buttons never come).
+  var EARLY_MS = 6000;
+  var earlySince = 0;
+  function earlyBox(c, kind) {
+    if (kind === "other" || !c.editor || c.send) {
+      if (c.send) earlySince = 0;
+      return null;
+    }
+    var now = performance.now();
+    if (!earlySince) {
+      earlySince = now;
+      record("chrome", "message box hidden before its buttons are there");
+    }
+    if (now - earlySince >= EARLY_MS) return null;
+    return wholeControl(c.editor, c.editor.getBoundingClientRect().height + 60);
+  }
+  // Text that turns up in claude.ai's hidden box while the app's bar is in use
+  // (dictated words arriving late, a draft claude.ai restored) moves to the
+  // app's bar. The same text is taken once only.
+  var sending = false;
+  var lastAdopted = "";
+  function adoptStrayText(c) {
+    if (sending || !c.editor) return;
+    var text = String(c.editor.textContent || "");
+    if (!text.replace(/\s/g, "")) {
+      lastAdopted = "";
+      return;
+    }
+    if (text === lastAdopted) return;
+    lastAdopted = text;
+    dictated = text.trim().slice(0, 20000);
+    clearEditor(c.editor);
+    record("chrome", "text in claude.ai's box moved to the app's bar: " + dictated.length + " characters");
   }
 
   var lastHiddenFound = null;
@@ -1585,7 +1636,9 @@
     var sidebar = ready && inSidebarMode();
     var hideBox = ready && !sidebar && !own && c.composer ? c.composer : null;
     // The sidebar button alone, never its panel: the native menu button covers it.
-    setHidden(ready && !sidebar ? c.topBar.concat([hideBox, c.sidebarButton]).filter(Boolean) : []);
+    var early = ready ? null : earlyBox(c, kind);
+    setHidden(ready && !sidebar ? c.topBar.concat([hideBox, c.sidebarButton]).filter(Boolean) : early ? [early] : []);
+    if (ready && !sidebar && !own) adoptStrayText(c);
     setCollapsed(hideBox);
     if (ready && !sidebar) {
       // Once per search of the page, not at every change of size or position.
@@ -1810,6 +1863,7 @@
     var editor = c.editor;
     var mode = editor.getAttribute("inputmode");
     var how = "pasted";
+    sending = true; // the text in claude.ai's box is this message, not a stray one
     if (!pasteInto(editor, text)) {
       how = "typed";
       editor.setAttribute("inputmode", "none");
@@ -1828,6 +1882,7 @@
           else editor.setAttribute("inputmode", mode);
         }
         record("chrome", "send (" + how + "): " + result);
+        nativeSetTimeout(function () { sending = false; }, 1500);
         resolve(result);
       };
       var attempt = function () {
