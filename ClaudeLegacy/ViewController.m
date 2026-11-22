@@ -496,6 +496,18 @@ API_AVAILABLE(ios(15.0))
     [self setModel:@"" effort:@""];
 
     _plusButton = [self barButton:@"plus" action:@selector(plusTapped) label:@"Add files"];
+    // The + menu is native too, filled from claude.ai's + menu each time it opens
+    // (files and photos, connectors, research, web search, …).
+    UIDeferredMenuElement *extras = [UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            completion(@[]);
+            return;
+        }
+        [strongSelf menuElementsFor:@"plus" completion:completion];
+    }];
+    _plusButton.menu = [UIMenu menuWithChildren:@[extras]];
+    _plusButton.showsMenuAsPrimaryAction = YES;
 
     _field = [[UIView alloc] init];
     _field.translatesAutoresizingMaskIntoConstraints = NO;
@@ -606,6 +618,23 @@ API_AVAILABLE(ios(15.0))
     [self updateActionButton];
 }
 
+/// An SF Symbol for a + menu entry, by its words (nil: no picture).
++ (UIImage *)symbolForMenuTitle:(NSString *)title {
+    NSString *t = title.lowercaseString;
+    NSArray<NSArray<NSString *> *> *pairs = @[
+        @[@"photo", @"photo.on.rectangle"], @[@"file", @"paperclip"], @[@"screenshot", @"camera.viewfinder"],
+        @[@"camera", @"camera"], @[@"project", @"folder"], @[@"web search", @"globe"], @[@"research", @"magnifyingglass"],
+        @[@"connector", @"puzzlepiece.extension"], @[@"skill", @"wand.and.stars"], @[@"style", @"paintbrush"],
+        @[@"github", @"chevron.left.forwardslash.chevron.right"], @[@"drive", @"externaldrive"], @[@"think", @"brain"],
+    ];
+    for (NSArray<NSString *> *pair in pairs) {
+        if ([t rangeOfString:pair[0]].location != NSNotFound) {
+            return [UIImage systemImageNamed:pair[1]];
+        }
+    }
+    return nil;
+}
+
 /// claude.ai's menu items as native menu entries. Without items, one entry
 /// that shows claude.ai's own menu.
 - (void)menuElementsFor:(NSString *)menu completion:(void (^)(NSArray<UIMenuElement *> *))completion {
@@ -658,6 +687,8 @@ API_AVAILABLE(ios(15.0))
             }
             if ([item[@"sub"] boolValue]) {
                 action.image = [UIImage systemImageNamed:@"chevron.right"];
+            } else {
+                action.image = [NativeChrome symbolForMenuTitle:title];
             }
             action.state = [item[@"checked"] boolValue] ? UIMenuElementStateOn : UIMenuElementStateOff;
             if ([item[@"disabled"] boolValue]) {
@@ -1329,9 +1360,26 @@ static const CGFloat kMessageBarHeight = 80;
         chrome.onMenuPick = ^(NSString *menu, NSDictionary *item) {
             NSString *title = [item[@"title"] isKindOfClass:NSString.class] ? item[@"title"] : @"";
             NSString *argument = [NSString stringWithFormat:@"%@\n%ld\n%@", menu, (long)[item[@"index"] integerValue], title];
-            [weakSelf askPage:@"menuPick" argument:argument completion:^(NSString *answer) {
+            void (^pick)(void) = ^{
+                [weakSelf askPage:@"menuPick" argument:argument completion:^(NSString *answer) {
+                    if (![answer isEqualToString:@"ok"]) {
+                        [weakSelf logEvent:[NSString stringWithFormat:@"native %@ menu: %@", menu, answer]];
+                    }
+                }];
+            };
+            // Files and photos: claude.ai's file field is pressed directly, inside
+            // this tap, so iOS shows its picker (pressing it after claude.ai's menu
+            // has been opened in the background could be refused as not a tap).
+            NSString *lower = title.lowercaseString;
+            BOOL files = [menu isEqualToString:@"plus"] && ![item[@"sub"] boolValue] &&
+                ([lower rangeOfString:@"file"].location != NSNotFound || [lower rangeOfString:@"photo"].location != NSNotFound);
+            if (!files) {
+                pick();
+                return;
+            }
+            [weakSelf askPage:@"pickFiles" argument:@"" completion:^(NSString *answer) {
                 if (![answer isEqualToString:@"ok"]) {
-                    [weakSelf logEvent:[NSString stringWithFormat:@"native %@ menu: %@", menu, answer]];
+                    pick();
                 }
             }];
         };

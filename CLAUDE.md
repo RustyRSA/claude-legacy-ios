@@ -430,7 +430,14 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   count only when claude.ai shows them (`shownByClaude`: not hidden / see-through /
   aria-hidden / inert on the way up to the app's own mark), so kept-but-hidden stop
   buttons no longer mean "answering". Typed text shows send even while Claude answers;
-  a failed send takes its text back out of claude.ai's box.
+  a failed send takes its text back out of claude.ai's box. Installed 22 Nov (`2712e8f`).
+- 21c: native + menu, same mechanism as the model menu (`MENU_BUTTONS.plus`; claude.ai's
+  menu read unseen, entries with SF Symbols by keyword, toggles checked, submenus show
+  claude.ai's submenu, nothing found -> "Show Claude's menu"). "Add files or photos"
+  does not go through claude.ai's menu: `pickFiles` presses claude.ai's hidden
+  `input[type=file]` (in the card, else the `multiple` one) straight from the native
+  tap, so iOS's own picker opens (a press after the background menu round trip may not
+  count as a tap); falls back to the menu pick. Not checked on device.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
@@ -721,7 +728,7 @@ Updated 22 Nov 2026 (round 21). Solved items were removed; see the rounds above.
 |---|---|
 | Voice mode after claude.ai's 20–22 Nov update | Fixed in round 21 (transpiler), works on the phone |
 | "Old UI behind the new UI in some scenarios" (Logan, 22 Nov) | Needs screenshots. Round 21 fixed claude.ai's own sidebar (edge swipe) under the bars. Debug log "on screen now" now marks hidden controls |
-| + menu and chat "..." menu | Still claude.ai's own menus (they open above the native bar). Native like the model menu if wanted |
+| Chat "..." menu | Still claude.ai's own menu. + menu native since 21c (not yet checked on the phone) |
 | Voice mode screen | claude.ai's own screen (the native bar steps aside). Native skin only if Logan asks (see round 20 rule) |
 | Sign-in cookie missing at every launch | App copy restores it each time (works); why WebKit drops it is unknown |
 | Random sign-outs | None logged since round 06's cookie flush + copy. Check the log after the next one: cookie present when refused → server side; missing → client side |

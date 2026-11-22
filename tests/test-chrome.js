@@ -284,6 +284,28 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(ss.ready, true);
   assert.strictEqual(ss.streaming, false, "a hidden stop button is not an answer being written");
 
+  // The + menu is read like the model menu; "pickFiles" presses claude.ai's file field.
+  const pm = page(HEADER + SIDEBAR + COMPOSER.replace("</fieldset>", '<input type="file" multiple class="sr-only"></fieldset>'));
+  await new Promise((res) => setTimeout(res, 50));
+  const pmd = pm.w.document;
+  pmd.querySelector('[aria-label="Add files, connectors, and more"]').addEventListener("click", () => {
+    const open = pmd.querySelector('[role="menu"]');
+    if (open) { open.remove(); return; }
+    const menu = pmd.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = '<div role="menuitem">Add files or photos</div><div role="menuitemcheckbox" aria-checked="true">Web search</div>' +
+      '<div role="menuitem" aria-haspopup="menu">Connectors</div>';
+    pmd.body.appendChild(menu);
+  });
+  const plusItems = JSON.parse(await pm.w.__appChrome.run("menuItems", "plus"));
+  assert.deepStrictEqual(plusItems.map((i) => i.title), ["Add files or photos", "Web search", "Connectors"]);
+  assert.strictEqual(plusItems[1].checked, true);
+  assert.strictEqual(plusItems[2].sub, true);
+  let fileClicked = false;
+  pmd.querySelector('input[type="file"]').addEventListener("click", (e) => { fileClicked = true; e.preventDefault(); });
+  assert.strictEqual(pm.w.__appChrome.run("pickFiles"), "ok");
+  assert.ok(fileClicked, "claude.ai's file field pressed");
+
   // The sidebar's sections: small text buttons are headings, links are chats; a
   // row that is a button (32 px) is not a heading.
   const GA = "4407ad06-cdee-427d-ae9c-fb9a4db6c0d9", GB = "5681ff6f-e872-4539-91f3-c38fb5bc04e1", GC = "172b4950-1441-4bd4-9e21-0dfb407689e7";

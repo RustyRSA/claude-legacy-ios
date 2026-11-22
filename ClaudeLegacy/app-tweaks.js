@@ -1835,7 +1835,10 @@
   // it is closed again; picking an entry opens it unseen once more and presses
   // the item. When no items are found, or the menu does not close, claude.ai's
   // menu is simply shown as before.
-  var MENU_BUTTONS = { model: 'button[aria-label^="Model:"]' };
+  var MENU_BUTTONS = {
+    model: 'button[aria-label^="Model:"]',
+    plus: 'button[aria-label="Add files, connectors, and more"]'
+  };
   var MENU_ITEMS = '[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"]';
   var quietTimer = null;
   function quietMenus(on) {
@@ -2138,6 +2141,22 @@
         case "menuItems": return menuItems(String(arg || ""));
         case "menuPick": return menuPick(String(arg || ""));
         case "more": result = press(c.more, "chat menu"); break;
+        case "pickFiles":
+          // claude.ai's own hidden file field, pressed at once (inside the tap):
+          // iOS then shows its own picker (photo library, camera, files). Its
+          // choice is attached by claude.ai as from its own menu.
+          var inputs = Array.prototype.slice.call(document.querySelectorAll('input[type="file"]')).filter(function (el) {
+            return !el.disabled && !el.closest("aside");
+          });
+          var input = inputs.filter(function (el) { return c.composer && c.composer.contains(el); })[0] ||
+            inputs.filter(function (el) { return el.multiple; })[0] || inputs[0];
+          if (input) {
+            input.click();
+            result = "ok";
+          } else {
+            result = "no file field";
+          }
+          break;
         case "removeAttachment":
           var attached = attachmentButtons(c)[Number(arg)];
           result = press(attached && attached.button, "remove button of that file");
