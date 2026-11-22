@@ -700,23 +700,21 @@ and icons, the official app's widgets/Siri/Shortcuts.
 
 ## Open items
 
+Updated 22 Nov 2026 (round 21). Solved items were removed; see the rounds above.
+
 | Item | Status |
 |---|---|
-| Launch (send button) 7.2 s → 2.1 s | Done in 07c. Next: the 1.2 s main-thread block at start (transpiler + worker source parsed every launch even when nothing needs transpiling?) |
-| 4 API calls fail "Load failed" since 07b | Open. Rule out the app first (reply handler, module timing) before blaming claude.ai |
-| claude.ai IndexedDB read rejected | Still after the web caches were deleted, so maybe not the quota. TransactionInactiveError suggests transaction timing (async IIFE wrapping / polyfills); investigate |
-| Sign-in cookie missing at every launch | App copy restores it each time; find why WebKit drops it |
-| claude.ai storage full (log 2) | 07 moves transpiled code out and deletes the web caches; check claude.ai's IndexedDB warning is gone |
-| Send button / mic / chats appear late | Same as above (they appear when React hydrates); native chat list would bypass it |
-| Sidebar taps sometimes do nothing | 06 tap fix + "taps without a click" counter. Confirm with the log; if misses remain, look at the logged targets |
-| Chat switch ~2 s | 06 logs address/data/settled times; decide between API and rendering |
-| Bigger controls | 06 page size 110 %. Next: per-control sizing from the "on screen now" list |
-| Random sign-outs (high priority) | 06 cookie flush + copy + event log. Check the log after the next sign-out: cookie present when refused → server side; missing → client side |
+| Voice mode after claude.ai's 20–22 Nov update | Transpiler fixed in round 21; not yet tried on the phone |
+| "Old UI behind the new UI in some scenarios" (Logan, 22 Nov) | Needs screenshots. Round 21 fixed claude.ai's own sidebar (edge swipe) under the bars. Debug log "on screen now" now marks hidden controls |
+| + menu and chat "..." menu | Still claude.ai's own menus (they open above the native bar). Native like the model menu if wanted |
+| Voice mode screen | claude.ai's own screen (the native bar steps aside). Native skin only if Logan asks (see round 20 rule) |
+| Sign-in cookie missing at every launch | App copy restores it each time (works); why WebKit drops it is unknown |
+| Random sign-outs | None logged since round 06's cookie flush + copy. Check the log after the next one: cookie present when refused → server side; missing → client side |
 | Re-login verification opens in Safari | 06 copied-link flow, `claudelegacy://` + Safari bookmarklet; optional Snap tweak redirect later |
-| Voice stops when locked / app switched | 06 background audio mode + logging. If the mic is muted while hidden, look at WebKit's capture-interruption settings |
-| Memory error, dead Continue | 06 automatic reload |
+| Voice stops when locked / app switched | WebKit mutes capture in the background. Background audio mode is set; no fix found |
 | Artifact / Doc links "browser not supported" | 06 covers the shell only. Next: inject the compatibility layer into `*.frame.claudeusercontent.com` frames (user scripts with `forMainFrameOnly:NO`, host-guarded; evaluate with `evaluateJavaScript:inFrame:` or in-frame nonce; separate, narrower bridge for those frames) |
-| Long-press copy | 06 restores link menu and text selection; confirm on device |
+| Launch time | Send button ~2.0 s from the store, ~4–9 s on the first launch after a claude.ai update (all modules transpiled again). claude.ai's own code runs ~1.7–2.6 s on the main thread: the floor for this design |
+| Landscape | claude.ai may dock its sidebar on a wide page; the app then steps aside (its own UI shows). Not designed for |
 
 ## Sign-in bookmarklet (Safari)
 

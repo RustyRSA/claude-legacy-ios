@@ -1064,18 +1064,21 @@
 
   // "Interactive" is when React has taken over the server-drawn page: its
   // internal keys appear on the message box. Until then taps do nothing.
+  // The text box itself is drawn by ProseMirror, not React ("interactive: not
+  // seen" in every log): React's keys are looked for on it and its parents.
   function reactOwns(el) {
-    if (!el) return false;
-    var keys = Object.keys(el);
-    for (var i = 0; i < keys.length; i++) {
-      if (keys[i].indexOf("__reactFiber") === 0 || keys[i].indexOf("__reactProps") === 0) return true;
+    for (var depth = 0; el && depth < 4; depth++, el = el.parentElement) {
+      var keys = Object.keys(el);
+      for (var i = 0; i < keys.length; i++) {
+        if (keys[i].indexOf("__reactFiber") === 0 || keys[i].indexOf("__reactProps") === 0) return true;
+      }
     }
     return false;
   }
   function pollLaunch() {
     var now = performance.now();
     if (!launch.interactive) {
-      var box = document.querySelector(COMPOSER);
+      var box = document.querySelector(EDITOR) || document.querySelector(COMPOSER);
       if (reactOwns(box)) launch.interactive = now;
     }
     if (!launch.sendButton && document.querySelector('button[aria-label*="Send" i], button[aria-label*="send" i]')) {
