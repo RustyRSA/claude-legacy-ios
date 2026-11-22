@@ -8,7 +8,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 [ -d node_modules/jsdom ] || npm install --no-audit --no-fund --silent
 REPO="$(cd .. && pwd)"
 TESTS="$PWD"
-for t in test-voice-patches.js test-loader.js; do
+for t in test-voice-patches.js test-loader.js test-transforms.js; do
   node "$t" "$REPO" | tail -n 1
 done
 for t in test-dom.js test-tweaks2.js test-patch.js test-chrome.js; do

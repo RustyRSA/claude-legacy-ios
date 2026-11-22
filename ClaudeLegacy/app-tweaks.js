@@ -1146,6 +1146,8 @@
         ", downloads retried " + (s.retries || 0) + ", modules not loaded " + (s.loadFailures || 0) +
         (s.loadError ? " (" + s.loadError + ")" : "")
     ];
+    // claude.ai's entry file: what tests/check-claude-modules.js needs.
+    if (mods[0]) out.push("  entry: " + String(mods[0].src).split("/").pop());
     var loader = window.__appLoader;
     if (loader && loader.runTimes) {
       var rt = loader.runTimes();
@@ -1265,8 +1267,10 @@
       for (var i = 0; i < nodes.length && out.length < 45; i++) {
         var r = nodes[i].getBoundingClientRect();
         if (r.width < 1 || r.height < 1 || r.bottom < 0 || r.top > h || r.right < 0 || r.left > w) continue;
+        var note = nodes[i].closest && nodes[i].closest("[data-app-hidden]") ? " (hidden)" :
+          (chromeState.ready && chromeState.topHeight && r.top < chromeState.topHeight ? " (under the top bar)" : "");
         out.push("  " + describeTarget(nodes[i]) + " " + Math.round(r.width) + "x" + Math.round(r.height) +
-          " at " + Math.round(r.left) + "," + Math.round(r.top));
+          " at " + Math.round(r.left) + "," + Math.round(r.top) + note);
       }
     } catch (e) {}
     return out.length ? ["on screen now (CSS px, layout width " + window.innerWidth + "):"].concat(out) : [];
@@ -1286,69 +1290,16 @@
   // nothing is hidden (ready: false) and the app shows claude.ai's own controls.
   var NATIVE_CHROME = !!settings.nativeChrome; // true or 1 from the app
   var chromeState = { ready: false, why: "not started" };
-  // claude.ai draws its message box before the app can find its buttons. What
-  // the box was last time (its tag and exact class list, per kind of page) is
-  // remembered, and a style hides anything matching it from the first moment
-  // of the next launch, until the app's own marks take over (6 s at most). A
-  // changed class list simply matches nothing.
-  var EARLY_KEY = "__appEarlyBox";
-  var earlyStyle = null;
-  function earlySelectors() {
-    try {
-      var saved = JSON.parse(localStorage.getItem(EARLY_KEY) || "{}");
-      return [saved.new, saved.chat].concat(Array.isArray(saved.early) ? saved.early.slice(0, 6) : []).filter(function (sel) {
-        return typeof sel === "string" && /^[a-z]+\[class="[^"\\]{1,400}"\]$/.test(sel);
-      });
-    } catch (e) {
-      return [];
-    }
-  }
-  function endEarlyStyle() {
-    if (earlyStyle && earlyStyle.parentNode) earlyStyle.parentNode.removeChild(earlyStyle);
-    earlyStyle = null;
-  }
-  // kind "new" / "chat": the message box card once the app is in use; "early":
-  // the boxes claude.ai draws before that (up to 6 kept). Only a class list that
-  // is long enough to be particular and matches this one element is kept, so the
-  // style cannot hide anything else.
-  var rememberedBoxes = [];
-  function rememberBox(kind, el) {
-    try {
-      if (!el || rememberedBoxes.indexOf(el) !== -1) return;
-      rememberedBoxes.push(el);
-      var cls = typeof el.className === "string" ? el.className : "";
-      if (cls.length < 12 || cls.length > 400 || /["\\]/.test(cls)) return;
-      var sel = el.tagName.toLowerCase() + '[class="' + cls + '"]';
-      if (document.querySelectorAll(sel).length !== 1) return;
-      var saved = JSON.parse(localStorage.getItem(EARLY_KEY) || "{}");
-      if (kind === "early") {
-        var list = Array.isArray(saved.early) ? saved.early : [];
-        if (list.indexOf(sel) !== -1 || sel === saved.new || sel === saved.chat) return;
-        list.unshift(sel);
-        saved.early = list.slice(0, 6);
-      } else {
-        if (saved[kind] === sel) return;
-        saved[kind] = sel;
-      }
-      localStorage.setItem(EARLY_KEY, JSON.stringify(saved));
-    } catch (e) {}
-  }
-  if (NATIVE_CHROME && /^\/(new|chat\/.*)?$/.test(location.pathname)) {
-    try {
-      var early = earlySelectors();
-      if (early.length && document.documentElement) {
-        earlyStyle = document.createElement("style");
-        earlyStyle.textContent = early.join(",") +
-          "{opacity:0!important;pointer-events:none!important;transition:none!important;animation:none!important}";
-        document.documentElement.appendChild(earlyStyle);
-        setTimeout(endEarlyStyle, 6000);
-      }
-    } catch (e) {}
-  }
+  try { localStorage.removeItem("__appEarlyBox"); } catch (e) {} // round 19 leftover
   var chromeSent = "";
   var EDITOR = '[contenteditable="true"][aria-label="Write your prompt to Claude"]';
   var DICTATION_FINISH = 'button[aria-label="Finish dictation"]';
   var DICTATION_CANCEL = 'button[aria-label="Cancel dictation"]';
+  // claude.ai's newer dictation (Nov 2026 code) has no finish / cancel: its
+  // Dictate button itself turns into "Stop dictation", then "Finishing
+  // dictation…" while the words arrive.
+  var DICTATION_STOP = 'button[aria-label="Stop dictation"]';
+  var DICTATION_FINISHING = 'button[aria-label="Finishing dictation\u2026"]';
   var EFFORTS = /^(Low|Medium|High|Extra|Max)$/;
 
   function find(selector, root) {
@@ -1517,7 +1468,7 @@
     var link = find('a[href="/artifacts"]');
     if (!link) return false;
     var box = link.getBoundingClientRect();
-    if (box.width === 0 || box.right <= 0 || box.left >= window.innerWidth) return false;
+    if (box.width === 0 || box.right <= 0 || box.left >= window.innerWidth || typeof document.elementFromPoint !== "function") return false;
     var hit = document.elementFromPoint(box.left + Math.min(20, box.width / 2), box.top + box.height / 2);
     return !!hit && (hit === link || link.contains(hit));
   }
@@ -1581,7 +1532,7 @@
     var open = sidebarShowing();
     if (open) sidebarMode.seenOpen = true;
     if ((sidebarMode.seenOpen && !open) || location.pathname !== sidebarMode.path ||
-        performance.now() - sidebarMode.since > 30000) {
+        (!sidebarMode.seenOpen && performance.now() - sidebarMode.since > 30000)) {
       nativeSetTimeout(chatGroupsFromPage, 300);
       record("chrome", "sidebar closed (" + (location.pathname !== sidebarMode.path ? "chat picked" :
         sidebarMode.seenOpen ? "seen closing" : "30 s passed, never seen open") + ")");
@@ -1697,31 +1648,31 @@
           (field.hasAttribute("contenteditable") ? " contenteditable=" + field.getAttribute("contenteditable") : "") + ")"));
     }
     if (now - earlySince >= EARLY_MS) return null;
-    var wrapper = wholeControl(field, field.getBoundingClientRect().height + 60);
-    rememberBox("early", wrapper);
-    return wrapper;
-  }
-  // What is in the middle of the page while the app is not ready yet (launch):
-  // tells which element claude.ai's early message box is, when it was not found.
-  function probeLaunch() {
-    if (chromeState.ready || pageKind() === "other" || typeof document.elementFromPoint !== "function") return;
-    var parts = [];
-    var el = document.elementFromPoint(Math.round(window.innerWidth / 2), Math.round(window.innerHeight * 0.42));
-    for (var depth = 0; el && el !== document.body && depth < 5; depth++, el = el.parentElement) {
-      parts.push(describeElement(el) + (el.getAttribute("role") ? " role=" + el.getAttribute("role") : "") +
-        (el.hasAttribute("contenteditable") ? " contenteditable=" + el.getAttribute("contenteditable") : "") +
-        (el.hasAttribute("data-placeholder") ? " data-placeholder" : "") + (el.hasAttribute("data-app-hidden") ? " (hidden by the app)" : ""));
-    }
-    record("chrome", "launch probe at " + Math.round(performance.now()) + " ms: " + (parts.join(" < ") || "nothing"));
+    return wholeControl(field, field.getBoundingClientRect().height + 60);
   }
   // Text that turns up in claude.ai's hidden box while the app's bar is in use
   // (dictated words arriving late, a draft claude.ai restored) moves to the
   // app's bar. The same text is taken once only.
   function dictating() {
-    return !!find(DICTATION_FINISH) ||
+    return !!find(DICTATION_FINISH) || !!find(DICTATION_STOP) || !!find(DICTATION_FINISHING) ||
       openSockets.some(function (ws) { return ws.readyState <= 1 && ws.__appKind === "speech_to_text"; });
   }
+  // Files attached to claude.ai's hidden message box: each has a remove button
+  // labelled "Remove <name>". Shown in the app's bar; names are never logged.
+  function attachmentButtons(c) {
+    var out = [];
+    var buttons = c.composer ? c.composer.querySelectorAll('button[aria-label^="Remove "]') : [];
+    for (var i = 0; i < buttons.length && out.length < 10; i++) {
+      var name = buttons[i].getAttribute("aria-label").slice(7).trim();
+      if (name && !/^(from queue|recording)$/i.test(name)) out.push({ button: buttons[i], name: name.slice(0, 60) });
+    }
+    return out;
+  }
+  function attachmentNames(c) {
+    return attachmentButtons(c).map(function (a) { return a.name; });
+  }
   var sending = false;
+  var discardDictationUntil = 0;
   var lastAdopted = "";
   var strayText = "";
   var strayAt = 0;
@@ -1753,8 +1704,13 @@
     }
     lastAdopted = text;
     strayText = "";
-    dictated = text.trim().slice(0, 20000);
     clearEditor(c.editor);
+    if (performance.now() < discardDictationUntil) {
+      discardDictationUntil = 0;
+      record("chrome", "cancelled dictation: its words were dropped");
+      return;
+    }
+    dictated = text.trim().slice(0, 20000);
     record("chrome", "text in claude.ai's box moved to the app's bar: " + dictated.length + " characters");
   }
 
@@ -1768,6 +1724,11 @@
     if (!c.send) missing.push("send button");
     if (!c.composer) missing.push("message box card");
     var ready = kind !== "other" && (missing.length === 0 || own);
+    if (ready && !sidebarMode && sidebarOpen()) {
+      // Opened by claude.ai itself (its edge swipe), not by the app's button.
+      sidebarMode = { since: performance.now(), path: location.pathname, seenOpen: true };
+      record("chrome", "sidebar opened by claude.ai");
+    }
     var sidebar = ready && inSidebarMode();
     var hideBox = ready && !sidebar && !own && c.composer ? c.composer : null;
     // The sidebar button alone, never its panel: the native menu button covers it.
@@ -1775,10 +1736,6 @@
     setHidden(ready && !sidebar ? c.topBar.concat([hideBox, c.sidebarButton]).filter(Boolean) : early ? [early] : []);
     if (ready && !sidebar && !own) adoptStrayText(c);
     setCollapsed(hideBox);
-    if (hideBox) {
-      endEarlyStyle();
-      rememberBox(kind, hideBox);
-    }
     if (ready && !sidebar) {
       // Once per search of the page, not at every change of size or position.
       if (found !== lastHiddenFound) {
@@ -1808,6 +1765,7 @@
       effort: effort,
       voice: !!find('button[aria-label="Use voice mode"]'),
       dictate: !!find('button[aria-label="Dictate"]'),
+      attachments: attachmentNames(c),
       dictating: dictating(),
       // What claude.ai has written so far while it dictates (its end), shown in
       // the app's field; never logged.
@@ -2137,6 +2095,10 @@
         case "menuItems": return menuItems(String(arg || ""));
         case "menuPick": return menuPick(String(arg || ""));
         case "more": result = press(c.more, "chat menu"); break;
+        case "removeAttachment":
+          var attached = attachmentButtons(c)[Number(arg)];
+          result = press(attached && attached.button, "remove button of that file");
+          break;
         case "plus": result = press(find('button[aria-label="Add files, connectors, and more"]'), "+ button"); break;
         case "model": result = press(find('button[aria-label^="Model:"]'), "model button"); break;
         case "dictate":
@@ -2147,8 +2109,16 @@
           // (adoptStrayText).
           result = press(find('button[aria-label="Dictate"]'), "dictate button");
           break;
-        case "dictateFinish": result = press(find(DICTATION_FINISH), "finish dictation button"); break;
-        case "dictateCancel": result = press(find(DICTATION_CANCEL), "cancel dictation button"); break;
+        case "dictateFinish": result = press(find(DICTATION_FINISH) || find(DICTATION_STOP), "finish dictation button"); break;
+        case "dictateCancel":
+          if (find(DICTATION_CANCEL)) {
+            result = press(find(DICTATION_CANCEL), "cancel dictation button");
+          } else {
+            // Only "Stop dictation": stopped, and the words it then writes are dropped.
+            discardDictationUntil = performance.now() + 10000;
+            result = press(find(DICTATION_STOP), "stop dictation button");
+          }
+          break;
         case "voice":
           // claude.ai's box is shown first, so its voice screen opens where it
           // can be seen.
@@ -2197,7 +2167,6 @@
     } catch (e) {}
     document.addEventListener("touchend", function () { nativeSetTimeout(updateChrome, 350); }, { passive: true, capture: true });
     setInterval(updateChrome, 1000);
-    [600, 1100, 1700].forEach(function (ms) { nativeSetTimeout(probeLaunch, ms); });
     nativeSetTimeout(chatsFromPage, 8000);
     nativeSetTimeout(chatGroupsFromPage, 5000);
     setInterval(chatGroupsFromPage, 60000);

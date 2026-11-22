@@ -210,8 +210,42 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(ds2.dictating, true);
   assert.ok(dd.querySelector("fieldset").hasAttribute("data-app-collapsed"), "box still hidden");
 
+  // claude.ai's newer dictation: the Dictate button becomes "Stop dictation".
+  // Finish presses it; cancel presses it too and drops the words that follow.
+  const nd = page(HEADER + SIDEBAR + COMPOSER);
+  await new Promise((res) => setTimeout(res, 50));
+  const ndd = nd.w.document;
+  ndd.querySelector('[aria-label="Dictate"]').setAttribute("aria-label", "Stop dictation");
+  await new Promise((res) => setTimeout(res, 300));
+  assert.strictEqual(nd.posted[nd.posted.length - 1].dictating, true, "Stop dictation means listening");
+  assert.strictEqual(nd.w.__appChrome.run("dictateFinish"), "ok");
+  assert.strictEqual(nd.clicks[nd.clicks.length - 1], "Stop dictation");
+  assert.strictEqual(nd.w.__appChrome.run("dictateCancel"), "ok");
+  ndd.querySelector('[aria-label="Stop dictation"]').setAttribute("aria-label", "Dictate");
+  ndd.querySelector("[contenteditable]").textContent = "words to drop";
+  await new Promise((res) => setTimeout(res, 1800));
+  assert.ok(!nd.posted.some((m) => m.dictated === "words to drop"), "cancelled words not handed to the app");
+  assert.ok(/cancelled dictation: its words were dropped/.test(nd.w.__appDebugLog()), "drop noted in the log");
+
+  // Files attached in claude.ai's hidden box are reported (names only to the app)
+  // and can be removed from the app.
+  const at = page(HEADER + SIDEBAR + COMPOSER.replace("</fieldset>", '<button aria-label="Remove photo.jpg">x</button><button aria-label="Remove from queue">q</button></fieldset>'));
+  await new Promise((res) => setTimeout(res, 50));
+  assert.deepStrictEqual(at.posted[at.posted.length - 1].attachments, ["photo.jpg"]);
+  assert.strictEqual(at.w.__appChrome.run("removeAttachment", "0"), "ok");
+  assert.strictEqual(at.clicks[at.clicks.length - 1], "Remove photo.jpg");
+  assert.ok(!/photo\.jpg/.test(at.w.__appDebugLog()), "file names stay out of the debug log");
+
+  // claude.ai opens its sidebar by itself (edge swipe): the app steps aside.
+  const sw = page(HEADER + '<nav><a href="/new">New</a><a href="/artifacts" data-rect="4,154,271,32">Artifacts</a></nav>' + COMPOSER);
+  await new Promise((res) => setTimeout(res, 50));
+  assert.strictEqual(sw.posted[sw.posted.length - 1].sidebarOpen, false);
+  sw.w.document.elementFromPoint = () => sw.w.document.querySelector('a[href="/artifacts"]');
+  await new Promise((res) => setTimeout(res, 1100));
+  assert.strictEqual(sw.posted[sw.posted.length - 1].sidebarOpen, true, "steps aside for claude.ai's own sidebar");
+
   // At launch claude.ai draws the box, then draws it anew: the new one is hidden
-  // in the same moment, and what the boxes were is remembered for the next launch.
+  // in the same moment.
   const el2 = page(HEADER + SIDEBAR + '<div class="early-stand-in-wrapper one" data-rect="20,180,310,60"><textarea data-rect="29,190,291,32"></textarea></div>');
   await new Promise((res) => setTimeout(res, 50));
   const ed = el2.w.document;
@@ -224,9 +258,7 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   ed.body.appendChild(real);
   await new Promise((res) => setTimeout(res, 20)); // well under the 120 ms timer
   assert.ok(real.querySelector("[contenteditable]").closest("[data-app-hidden]"), "redrawn box hidden at once");
-  const remembered = JSON.parse(el2.w.localStorage.getItem("__appEarlyBox"));
-  assert.ok(remembered.early.some((sel) => sel.includes("early-stand-in-wrapper")) && remembered.early.some((sel) => sel.includes("real-box-in-the-middle")),
-    "early boxes remembered: " + JSON.stringify(remembered));
+
 
   // The sidebar's sections: small text buttons are headings, links are chats; a
   // row that is a button (32 px) is not a heading.

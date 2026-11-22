@@ -128,7 +128,7 @@ function run({ fast, caches, manifest, store, migrate, workers = true, workerBre
   assert.strictEqual(s1.misses, 5);
   assert.strictEqual(s1.workerJobs, 5, "all transpiled in workers");
   assert.strictEqual(first.workersMade, 2);
-  const fastStore = caches.stores.get("transpiled-fast-v0.1.24-1");
+  const fastStore = caches.stores.get("transpiled-fast-v0.1.24-2");
   const indexCode = fastStore.get(BASE + "/index.js");
   assert.ok(indexCode.startsWith("'use strict';\n//@deps ./a.js ./b.js\n"), "deps line: " + indexCode.slice(0, 60));
   assert.ok(!/\n {2}/.test(indexCode.split("\n").slice(2).join("\n")), "minified output");
@@ -208,7 +208,7 @@ function run({ fast, caches, manifest, store, migrate, workers = true, workerBre
   second2.LT.pruneCache(manifest.filter((u) => !u.endsWith("d.js")));
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(!caches.stores.has("transpiled-v0.1.24"), "old cache removed");
-  const fastStore2 = caches.stores.get("transpiled-fast-v0.1.24-1");
+  const fastStore2 = caches.stores.get("transpiled-fast-v0.1.24-2");
   assert.ok(!fastStore2.has(BASE + "/d.js") && fastStore2.has(BASE + "/c.js"), "unused entry pruned");
 
   // No workers available: transpiled on the page instead, same order.
@@ -221,7 +221,7 @@ function run({ fast, caches, manifest, store, migrate, workers = true, workerBre
   // Worker output equals page output.
   const plain = makeCaches();
   await run({ fast: true, caches: plain, workers: false });
-  assert.strictEqual(plain.stores.get("transpiled-fast-v0.1.24-1").get(BASE + "/a.js"), fastStore.get(BASE + "/a.js"));
+  assert.strictEqual(plain.stores.get("transpiled-fast-v0.1.24-2").get(BASE + "/a.js"), fastStore.get(BASE + "/a.js"));
 
   // A download that fails (the head start, then the first real try) is tried
   // again; the page still starts, in order.

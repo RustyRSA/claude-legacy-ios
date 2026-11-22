@@ -357,6 +357,7 @@ API_AVAILABLE(ios(15.0))
     UIButton *_modelButton;
     UIButton *_micButton;
     UIButton *_actionButton;
+    UIButton *_attachButton;
     NSString *_actionName;
     NSLayoutConstraint *_topBarBottom;
     NSArray<UIButton *> *_buttons;
@@ -528,7 +529,19 @@ API_AVAILABLE(ios(15.0))
     for (UIView *view in @[_textView, _placeholder, _micButton]) {
         [_field addSubview:view];
     }
-    for (UIView *view in @[_modelButton, _plusButton, _field, _actionButton]) {
+    // Files attached in claude.ai's (hidden) box: a paperclip with their number at
+    // the right of the model row; its menu lists them, each can be removed.
+    UIButtonConfiguration *attachConfig = [UIButtonConfiguration plainButtonConfiguration];
+    attachConfig.image = SymbolImage(@"paperclip", 13, UIImageSymbolWeightSemibold);
+    attachConfig.imagePadding = 4;
+    attachConfig.contentInsets = NSDirectionalEdgeInsetsMake(0, 8, 0, 8);
+    attachConfig.baseForegroundColor = UIColor.secondaryLabelColor;
+    _attachButton = [UIButton buttonWithConfiguration:attachConfig primaryAction:nil];
+    _attachButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _attachButton.showsMenuAsPrimaryAction = YES;
+    _attachButton.hidden = YES;
+
+    for (UIView *view in @[_modelButton, _plusButton, _field, _actionButton, _attachButton]) {
         [_bottomBar addSubview:view];
     }
 
@@ -541,7 +554,10 @@ API_AVAILABLE(ios(15.0))
 
         [_modelButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:8],
         [_modelButton.heightAnchor constraintEqualToConstant:30],
-        [_modelButton.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-8],
+        [_modelButton.trailingAnchor constraintLessThanOrEqualToAnchor:_attachButton.leadingAnchor constant:-4],
+        [_attachButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-8],
+        [_attachButton.centerYAnchor constraintEqualToAnchor:_modelButton.centerYAnchor],
+        [_attachButton.heightAnchor constraintEqualToConstant:30],
         [_modelButton.bottomAnchor constraintEqualToAnchor:_field.topAnchor constant:-2],
 
         [_plusButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:4],
@@ -905,6 +921,7 @@ static const CGFloat kMessageBarHeight = 80;
     NSString *model = [state[@"model"] isKindOfClass:NSString.class] ? state[@"model"] : @"";
     NSString *effort = [state[@"effort"] isKindOfClass:NSString.class] ? state[@"effort"] : @"";
     [self setModel:model effort:effort];
+    [self setAttachments:[state[@"attachments"] isKindOfClass:NSArray.class] ? state[@"attachments"] : @[]];
     [self updateActionButton];
 
     // Words dictated in claude.ai's box arrive here, to be sent from this bar.
@@ -944,6 +961,34 @@ static const CGFloat kMessageBarHeight = 80;
         [_textView becomeFirstResponder];
     }
     _refocusAfterSend = NO;
+}
+
+- (void)setAttachments:(NSArray *)names {
+    NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
+    __weak typeof(self) weakSelf = self;
+    [names enumerateObjectsUsingBlock:^(id name, NSUInteger index, BOOL *stop) {
+        if (![name isKindOfClass:NSString.class]) {
+            return;
+        }
+        UIAction *remove = [UIAction actionWithTitle:[@"Remove " stringByAppendingString:name]
+                                               image:[UIImage systemImageNamed:@"xmark.circle"]
+                                          identifier:nil
+                                             handler:^(__kindof UIAction *action) {
+            [weakSelf fire:@"removeAttachment" argument:[NSString stringWithFormat:@"%lu", (unsigned long)index]];
+        }];
+        remove.attributes = UIMenuElementAttributesDestructive;
+        [items addObject:remove];
+    }];
+    _attachButton.hidden = items.count == 0;
+    if (items.count == 0) {
+        return;
+    }
+    UIButtonConfiguration *config = _attachButton.configuration;
+    config.title = [NSString stringWithFormat:@"%lu", (unsigned long)items.count];
+    _attachButton.configuration = config;
+    _attachButton.accessibilityLabel = [NSString stringWithFormat:@"%lu attached", (unsigned long)items.count];
+    _attachButton.menu = [UIMenu menuWithTitle:items.count == 1 ? @"1 file attached" : [NSString stringWithFormat:@"%lu files attached", (unsigned long)items.count]
+                                      children:items];
 }
 
 - (void)fire:(NSString *)name argument:(NSString *)argument {
@@ -1033,6 +1078,7 @@ static const CGFloat kMessageBarHeight = 80;
 @property (nonatomic, strong, nullable) UIView *nativeChrome;
 /// The page reported that the native controls are in use (its controls found).
 @property (nonatomic, assign) BOOL chromeReady;
+@property (nonatomic, weak, nullable) UIScreenEdgePanGestureRecognizer *edgeSwipe;
 /// A chat picked from the native list before the first page load: loaded first.
 @property (nonatomic, strong, nullable) NSURL *launchURL;
 /// The page's bottom edge: the safe area's, or the top of the native message bar.
@@ -1153,6 +1199,16 @@ static const CGFloat kMessageBarHeight = 80;
     menuGesture.cancelsTouchesInView = NO;
     menuGesture.delegate = self;
     [_webView addGestureRecognizer:menuGesture];
+
+    // A swipe in from the left edge opens the app's chat list (when the app's bars
+    // are in use and the list has chats), as in other chat apps. It takes the
+    // touch from the page, so claude.ai's own edge swipe does not also open.
+    UIScreenEdgePanGestureRecognizer *edgeSwipe =
+        [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self action:@selector(handleEdgeSwipe:)];
+    edgeSwipe.edges = UIRectEdgeLeft;
+    edgeSwipe.delegate = self;
+    [self.view addGestureRecognizer:edgeSwipe];
+    self.edgeSwipe = edgeSwipe;
 
     // Voice replies must not end up on the quiet earpiece speaker.
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -1494,11 +1550,34 @@ static const CGFloat kMessageBarHeight = 80;
 - (void)clearLeftoverWebCachesIfLarge {
     NSURL *caches = [[NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory
                                                           inDomains:NSUserDomainMask] firstObject];
-    NSURL *folder = [caches URLByAppendingPathComponent:@"WebKit/CacheStorage" isDirectory:YES];
+    [self clearWebsiteData:WKWebsiteDataTypeFetchCache
+                  inFolder:[caches URLByAppendingPathComponent:@"WebKit/CacheStorage" isDirectory:YES]
+                  overSize:100LL * 1024 * 1024
+                     after:0
+                     label:@"web cache storage"];
+    // WebKit's own HTTP cache has no size limit here: 1.2 GB on 22 Nov 2026. It
+    // only holds claude.ai's downloads (pages, images, original modules, which the
+    // app's module store has in converted form), so it is emptied above 400 MB,
+    // a while after launch so the start is not slowed.
+    [self clearWebsiteData:WKWebsiteDataTypeDiskCache
+                  inFolder:[caches URLByAppendingPathComponent:@"WebKit/NetworkCache" isDirectory:YES]
+                  overSize:400LL * 1024 * 1024
+                     after:90
+                     label:@"WebKit download cache"];
+}
+
+/// Removes one kind of WebKit website data when its folder has grown past a size
+/// (only that kind: cookies, IndexedDB and local storage stay), and logs it.
+- (void)clearWebsiteData:(NSString *)type
+                inFolder:(NSURL *)folder
+                overSize:(long long)limit
+                   after:(NSTimeInterval)delay
+                   label:(NSString *)label {
     __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         long long bytes = [weakSelf sizeOfFolder:folder];
-        if (bytes < 100LL * 1024 * 1024) {
+        if (bytes < limit) {
             return;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1507,15 +1586,15 @@ static const CGFloat kMessageBarHeight = 80;
                 return;
             }
             NSDate *started = [NSDate date];
-            [strongSelf.webView.configuration.websiteDataStore removeDataOfTypes:[NSSet setWithObject:WKWebsiteDataTypeFetchCache]
+            [strongSelf.webView.configuration.websiteDataStore removeDataOfTypes:[NSSet setWithObject:type]
                                                                    modifiedSince:[NSDate distantPast]
                                                                completionHandler:^{
                 NSTimeInterval seconds = -[started timeIntervalSinceNow];
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                     long long left = [weakSelf sizeOfFolder:folder];
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        [weakSelf logEvent:[NSString stringWithFormat:@"web cache storage cleared: %.0f MB before, %.0f MB left, took %.1f s",
-                                            bytes / 1048576.0, left / 1048576.0, seconds]];
+                        [weakSelf logEvent:[NSString stringWithFormat:@"%@ cleared: %.0f MB before, %.0f MB left, took %.1f s",
+                                            label, bytes / 1048576.0, left / 1048576.0, seconds]];
                     });
                 });
             }];
@@ -1697,6 +1776,22 @@ static const CGFloat kMessageBarHeight = 80;
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
     shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     return YES;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer != self.edgeSwipe) {
+        return YES;
+    }
+    UIView *chrome = self.nativeChrome;
+    return chrome != nil && !chrome.hidden && chrome.alpha > 0.5 && self.chromeReady
+        && self.presentedViewController == nil && [ChatListStore chats].count > 0;
+}
+
+- (void)handleEdgeSwipe:(UIScreenEdgePanGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+        [self presentChatList];
+    }
 }
 
 - (void)handleMenuGesture:(UILongPressGestureRecognizer *)gesture {

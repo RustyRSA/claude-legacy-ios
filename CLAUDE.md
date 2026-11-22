@@ -30,7 +30,7 @@ Injected as `WKUserScript`s at document start, in this order
 | 2 | `app-tweaks.js` | Ours. App feel, page size, tap fix, voice patches, WebSocket address fix, debug log and measurements |
 | 3 | iOS version (inline) | `window.iosVersion` |
 | 4 | custom CSS (document end) | Upstream: hides "Continue with Google" (Google blocks embedded web views) |
-| 5 | `legacy-transpiler.js` | Bundle of [mgefimov/legacy-transpiler](https://github.com/mgefimov/legacy-transpiler) 0.1.24 (acorn + astring + transforms) **plus our loader changes** in its `src/index.ts` section |
+| 5 | `legacy-transpiler.js` | Bundle of [mgefimov/legacy-transpiler](https://github.com/mgefimov/legacy-transpiler) 0.1.24 (acorn + astring + transforms) **plus our loader changes** in its `src/index.ts` section and two fixes marked "App change" (static blocks of named class expressions, arrow bodies starting with an object pattern; round 21) |
 | 6 | worker source (inline) | Fast loading: transpiler + `transpile-worker.js` as a string, turned into background Workers |
 | 7 | `patch.js` | Blocks claude.ai's entry module script, starts the loader, runs each module |
 | 8 | PoomSmart Polyfills | Submodule `Polyfills` (pinned commit), injected by `PolyfillsLoader.m`: base scripts plus every version folder newer than the running iOS |
@@ -51,7 +51,7 @@ Modules run in one of two ways (`patch.js`):
 
 ### Loader (round 6, `legacy-transpiler.js` → "Module loading")
 - Classic mode = upstream behaviour (serial, cache `transpiled-v0.1.24`).
-- Fast mode: one cache handle; cache `transpiled-fast-v0.1.24-1` with minified
+- Fast mode: one cache handle; cache `transpiled-fast-v0.1.24-2` (was `-1` until round 21; bump the number whenever a transform changes, so stored output is redone) with minified
   output; every module starts with `'use strict';\n//@deps ./a.js ./b.js\n` so its
   static imports are fetched as soon as its code is known (`warm()`); cache misses
   are downloaded and transpiled in 2 background Workers (`transpile-worker.js`,
@@ -87,6 +87,8 @@ Modules run in one of two ways (`patch.js`):
 | `.github/workflows/build-ipa.yml` | The build (see below) |
 | `tools/update.sh` | Logan's one-command update from Git Bash on Windows |
 | `tests/` | Node/jsdom tests for the JavaScript: `bash tests/run.sh` |
+| `tests/check-claude-modules.js` | Downloads claude.ai's whole current module graph and checks every module's transpiled output (syntax, static blocks, lookbehind): `node tests/check-claude-modules.js index-XXXX.js` (entry name in the debug log's launch section). Run after claude.ai updates |
+| `tools/pull-log.sh` | Fetches the app's debug log from the phone over SSH (round 17) |
 
 ## Build and install
 
@@ -374,6 +376,47 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   screens (voice mode, the + menu's pickers) prefer stepping aside over re-skinning,
   unless Logan asks for that screen specifically.
 
+### Round 21 (22 Nov 2026) — voice mode crash (transpiler), clean-up
+- Log 22 Nov (claude.ai updated 20–22 Nov, ~1,250 modules re-transpiled per launch):
+  voice mode failed with `undefined is not an object (evaluating
+  't.MIC_FLOW_PROBE_INTERVAL_MS')`; Logan had turned native controls off to test.
+- Cause: the transpiler's static-block transform. claude.ai's voice session is
+  `new class t { … static { this.MIC_FLOW_PROOF_LAG_MS = 1e3 + 2 * t.MIC_FLOW_PROBE_INTERVAL_MS } }`;
+  `wrapClassExpression` moved the blocks out of the class body into an IIFE that
+  held the class as `_static_block_class__`, so `t` no longer named the class (it
+  read an outer `t`). Now the class is held under its own name (`const t = class t`).
+  Checked over claude.ai's whole graph: 14 modules were affected (incl. a 2.2 MB one,
+  `shared-41`, `vendor-all-…`, `tree-sitter`), all now differ only there.
+- Second bug found the same way: astring printed `() => ({offsetX: n} = o)` without its
+  parentheses (syntax error; module `c085f04be`, claude.ai's edge-swipe handler, used
+  by 3 others, never ran). `arrowBodyStartsWithBrace()` adds them.
+- Also: `export class C { static {…} }` / `export default class C` are now converted.
+- Store folder `transpiled-fast-v0.1.24-2`: every module is transpiled again once
+  (first launch after installing is slow, like after a claude.ai update); housekeeping
+  removes the `-1` folder.
+- `tests/test-transforms.js` (runs the transpiled code), `tests/check-claude-modules.js`
+  (whole graph: 5,385 modules, 0 problems on 22 Nov). Phone was not reachable over
+  SSH this round (asleep / off the network), so modules came from the asset host.
+- Dictation: claude.ai's newer dictate button turns into "Stop dictation" /
+  "Finishing dictation…" (no finish / cancel buttons). Native tick presses Finish or
+  Stop; native cancel presses Cancel, or Stop and drops the words that follow (10 s).
+- Sidebar: claude.ai's own sidebar (its edge swipe, now working) puts the app into
+  sidebar mode by itself (hit test on the Artifacts link), and sidebar mode no longer
+  ends after 30 s while the sidebar is still open (the bars came back over it).
+- Native left-edge swipe opens the native chat list (`UIScreenEdgePanGestureRecognizer`
+  on the main view, only when the bars are in use and the list has chats).
+- Attached files: names from "Remove <name>" buttons in claude.ai's hidden box are
+  reported (`attachments`); a paperclip with the count shows at the right of the model
+  row, its menu removes a file (`removeAttachment`). Names never logged.
+- WebKit's HTTP cache (`Caches/WebKit/NetworkCache`, 1.2 GB) is emptied when over
+  400 MB, 90 s after launch (`-clearWebsiteData:…`, WKWebsiteDataTypeDiskCache).
+- Removed: the remembered early-box style and the launch probe (round 19 / 17; the
+  cover does that job); `localStorage.__appEarlyBox` is deleted once.
+- Debug log: "on screen now" marks controls the app hides "(hidden)" and ones under the
+  native top bar; launch section names claude.ai's entry file.
+- Not checked on device. "Old UI behind the new UI in some scenarios": no screenshots
+  yet; the sidebar fixes above cover one likely case.
+
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
   App Store + Mobbin screenshots). Use Apple's own iOS 16 controls (UIKit, SF Symbols, New York
@@ -642,9 +685,9 @@ Usability 3/4/8 · Performance 2/6/7-8 · Reliability 3/7/8 · Functional comple
 
 | Phase | Work | Status |
 |---|---|---|
-| A | Native controls stage 1: verify on device, keep the last message clear of the native box, keyboard stays after sending | In progress (round 13 generic bars built on 12e, awaiting device check) |
-| B | Native menus: +, model, chat "..." as UIMenu filled from claude.ai's options | Next (round 14 only stops the bar clipping claude.ai's menus) |
-| C | Native chat list: cached on the phone (instant at launch), search | First version built (13c), awaiting device check |
+| A | Native controls stage 1: verify on device, keep the last message clear of the native box, keyboard stays after sending | Done on device (rounds 13–20): bars, send, page ends at the bar, launch cover, native dictation |
+| B | Native menus: +, model, chat "..." as UIMenu filled from claude.ai's options | Model menu native (rounds 15–18); + and "..." still claude.ai's |
+| C | Native chat list: cached on the phone (instant at launch), search | Done (13c–15): sections, collapsible, search; left-edge swipe (21) |
 | D | Message styling: user bubble, serif replies, spacing, reply toolbar, scroll-down button | Planned |
 | E | Polish: haptics, edge swipe for the chat list, long-press menus, sheets for artifacts/files | Planned |
 | F | Reliability: why WebKit drops the sign-in cookie; alarm when claude.ai renames a label we use | Planned |

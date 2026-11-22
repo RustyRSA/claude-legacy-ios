@@ -6629,6 +6629,13 @@ var LegacyTranspiler = (() => {
         state.write("(");
         this.ObjectExpression(node.body, state);
         state.write(")");
+      } else if (arrowBodyStartsWithBrace(node.body)) {
+        // App change (22 Nov 2026): `() => ({a: b} = c)` was printed without its
+        // parentheses, which is a syntax error (claude.ai module c085f04be, used by
+        // three others, never ran).
+        state.write("(");
+        this[node.body.type](node.body, state);
+        state.write(")");
       } else {
         this[node.body.type](node.body, state);
       }
@@ -7756,6 +7763,46 @@ var LegacyTranspiler = (() => {
     }
   }
 
+  // App change: an arrow function body whose printed form would begin with "{"
+  // (an object or object pattern at its far left) must be wrapped in parentheses.
+  function arrowBodyStartsWithBrace(node) {
+    for (let i = 0; node && i < 100; i++) {
+      switch (node.type) {
+        case "ObjectExpression":
+        case "ObjectPattern":
+          return true;
+        case "AssignmentExpression":
+        case "BinaryExpression":
+        case "LogicalExpression":
+          node = node.left;
+          break;
+        case "SequenceExpression":
+          return false; // printed in parentheses already
+        case "ConditionalExpression":
+          node = node.test;
+          break;
+        case "MemberExpression":
+          node = node.object;
+          break;
+        case "CallExpression":
+          node = node.callee;
+          break;
+        case "TaggedTemplateExpression":
+          node = node.tag;
+          break;
+        case "ChainExpression":
+          node = node.expression;
+          break;
+        case "UpdateExpression":
+          if (node.prefix) return false;
+          node = node.argument;
+          break;
+        default:
+          return false;
+      }
+    }
+    return false;
+  }
   // src/transforms/transformStaticBlock.ts
   var counter = 0;
   var STATIC_BLOCK_METHOD_PREFIX = "_static_block__";
@@ -7835,10 +7882,16 @@ var LegacyTranspiler = (() => {
     }
     return [stmt];
   }
-  function tempId() {
-    return { type: "Identifier", name: STATIC_BLOCK_CLASS_TEMP, start: 0, end: 0 };
+  function tempId(name) {
+    return { type: "Identifier", name: name || STATIC_BLOCK_CLASS_TEMP, start: 0, end: 0 };
   }
+  // App change (22 Nov 2026): the blocks move out of the class body, where the
+  // name of a named class expression (`new class t { static { … t.X … } }`) is no
+  // longer in scope; they read an outer `t` instead (claude.ai's voice session
+  // since its 20 Nov update: "undefined is not an object (evaluating
+  // 't.MIC_FLOW_PROBE_INTERVAL_MS')"). So the class is held under its own name.
   function wrapClassExpression(node) {
+    const holder = node.id && node.id.name;
     const blocks = [];
     const kept = node.body.body.filter((member) => {
       if (member.type === "StaticBlock") {
@@ -7861,7 +7914,7 @@ var LegacyTranspiler = (() => {
         kind: "const",
         declarations: [{
           type: "VariableDeclarator",
-          id: tempId(),
+          id: tempId(holder),
           init: innerClass,
           start: 0,
           end: 0
@@ -7892,7 +7945,7 @@ var LegacyTranspiler = (() => {
             start: 0,
             end: 0
           },
-          arguments: [tempId()],
+          arguments: [tempId(holder)],
           optional: false,
           start: 0,
           end: 0
@@ -7900,7 +7953,7 @@ var LegacyTranspiler = (() => {
         start: 0,
         end: 0
       })),
-      { type: "ReturnStatement", argument: tempId(), start: 0, end: 0 }
+      { type: "ReturnStatement", argument: tempId(holder), start: 0, end: 0 }
     ];
     return {
       type: "CallExpression",
@@ -7928,6 +7981,16 @@ var LegacyTranspiler = (() => {
         node.body = node.body.flatMap((stmt) => {
           if (stmt.type === "ClassDeclaration" || stmt.type === "VariableDeclaration") {
             return processStmt(stmt);
+          }
+          // App change: `export class C { static {…} }` and `export default class C …`.
+          const inner = (stmt.type === "ExportNamedDeclaration" || stmt.type === "ExportDefaultDeclaration") && stmt.declaration;
+          if (inner && inner.type === "ClassDeclaration" && inner.id) {
+            const out = processStmt(inner);
+            return [stmt].concat(out.slice(1));
+          }
+          if (inner && inner.type === "VariableDeclaration") {
+            const out = processStmt(inner);
+            return [stmt].concat(out.slice(1));
           }
           return [stmt];
         });
@@ -8395,7 +8458,7 @@ var LegacyTranspiler = (() => {
   // web cache is used as before. All reads go through a queue where modules the
   // page is waiting for go first.
   var CACHE_NAME = "transpiled-v".concat(version2);
-  var FAST_CACHE_NAME = "transpiled-fast-v".concat(version2, "-1");
+  var FAST_CACHE_NAME = "transpiled-fast-v".concat(version2, "-2");
   var BATCH_SIZE = 40;
   var READ_LIMIT = 6;
   var DEPS_PREFIX = "//@deps ";
