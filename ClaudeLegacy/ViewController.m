@@ -844,7 +844,9 @@ static const CGFloat kMessageBarHeight = 80;
         background = self.tintColor;
         tint = UIColor.whiteColor;
         label = @"Finish dictation";
-    } else if (_streaming) {
+    } else if (_streaming && !hasText) {
+        // Stop while Claude answers; typed text can still be sent (claude.ai
+        // takes it as the next message).
         _actionName = @"stop";
         image = SymbolImage(@"stop.fill", 13, UIImageSymbolWeightRegular);
         background = UIColor.labelColor;
@@ -869,7 +871,7 @@ static const CGFloat kMessageBarHeight = 80;
     _actionButton.backgroundColor = background;
     _actionButton.tintColor = tint;
     _actionButton.accessibilityLabel = label;
-    _micButton.hidden = _streaming;
+    _micButton.hidden = _streaming && !hasText;
 }
 
 - (void)textViewDidChange:(UITextView *)textView {

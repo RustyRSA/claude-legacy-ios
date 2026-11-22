@@ -260,6 +260,30 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.ok(real.querySelector("[contenteditable]").closest("[data-app-hidden]"), "redrawn box hidden at once");
 
 
+  // While Claude answers with an empty draft, claude.ai shows only "Stop response"
+  // in place of the send button: still in use, streaming; when it is done the
+  // send button is back. A stop button claude.ai keeps hidden is not streaming.
+  const sr = page(HEADER + SIDEBAR + COMPOSER);
+  await new Promise((res) => setTimeout(res, 50));
+  const srd = sr.w.document;
+  const sendB = srd.querySelector('[aria-label="Send message"]');
+  sendB.setAttribute("aria-label", "Stop response");
+  await new Promise((res) => setTimeout(res, 300));
+  let ss = sr.posted[sr.posted.length - 1];
+  assert.strictEqual(ss.ready, true, "in use while Claude answers: " + ss.why);
+  assert.strictEqual(ss.streaming, true);
+  assert.strictEqual(sr.w.__appChrome.run("stop"), "ok");
+  assert.strictEqual(sr.clicks[sr.clicks.length - 1], "Stop response");
+  sendB.setAttribute("aria-label", "Send message");
+  const ghost = srd.createElement("button");
+  ghost.setAttribute("aria-label", "Stop response");
+  ghost.style.opacity = "0";
+  srd.querySelector("fieldset").appendChild(ghost);
+  await new Promise((res) => setTimeout(res, 300));
+  ss = sr.posted[sr.posted.length - 1];
+  assert.strictEqual(ss.ready, true);
+  assert.strictEqual(ss.streaming, false, "a hidden stop button is not an answer being written");
+
   // The sidebar's sections: small text buttons are headings, links are chats; a
   // row that is a button (32 px) is not a heading.
   const GA = "4407ad06-cdee-427d-ae9c-fb9a4db6c0d9", GB = "5681ff6f-e872-4539-91f3-c38fb5bc04e1", GC = "172b4950-1441-4bd4-9e21-0dfb407689e7";

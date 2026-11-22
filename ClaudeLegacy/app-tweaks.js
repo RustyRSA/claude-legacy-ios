@@ -1302,6 +1302,8 @@
   // Dictate button itself turns into "Stop dictation", then "Finishing
   // dictation…" while the words arrive.
   var DICTATION_STOP = 'button[aria-label="Stop dictation"]';
+  var SEND = 'button[aria-label="Send message"]';
+  var STOP_RESPONSE = 'button[aria-label="Stop response"], button[aria-label="Stop Claude response"]';
   var DICTATION_FINISHING = 'button[aria-label="Finishing dictation\u2026"]';
   var EFFORTS = /^(Low|Medium|High|Extra|Max)$/;
 
@@ -1371,7 +1373,17 @@
     c.editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]');
     // While claude.ai dictates, its send button is replaced by "Finish dictation"
     // and "Cancel dictation" (log 14 Nov): the box is still the same box.
-    c.send = find('button[aria-label="Send message"]') || find(DICTATION_FINISH);
+    c.send = shownButton(SEND) || find(SEND) || find(DICTATION_FINISH);
+    // While Claude answers with an empty draft, claude.ai shows only "Stop
+    // response" where the send button was (22 Nov code): the card is the same,
+    // and the app must stay in use (it greyed out its buttons and, after 15 s,
+    // stepped aside: no second message could be sent).
+    if (!c.send && c.editor) {
+      var stop = shownButton(STOP_RESPONSE);
+      var known = found && found.composer && found.composer.isConnected && found.composer.contains(stop) && found.composer.contains(c.editor);
+      var near = stop && holding([c.editor, stop]);
+      if (stop && (known || (near && near.getBoundingClientRect().height < 400))) c.send = stop;
+    }
     c.sidebarButton = find('button[aria-label="Show sidebar"]');
     var samePage = !!found && found.path === location.pathname;
     // The message box card found before is kept while it still holds the text
@@ -1475,10 +1487,37 @@
     var hit = document.elementFromPoint(box.left + Math.min(20, box.width / 2), box.top + box.height / 2);
     return !!hit && (hit === link || link.contains(hit));
   }
+  // Shown as far as claude.ai is concerned: not hidden, see-through or removed
+  // from view by claude.ai itself on the way up to the app's own hidden mark
+  // (claude.ai keeps buttons it is animating away, and variants it toggles, in
+  // the page).
+  function shownByClaude(el) {
+    for (var n = el; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      if (n.hasAttribute("data-app-hidden") || n.hasAttribute("data-app-collapsed")) return true;
+      if (n.hidden || n.getAttribute("aria-hidden") === "true" || n.hasAttribute("inert")) return false;
+      var style = getComputedStyle(n);
+      var opacity = parseFloat(style.opacity);
+      if (style.display === "none" || style.visibility === "hidden" || (!isNaN(opacity) && opacity < 0.05)) return false;
+    }
+    return true;
+  }
+  // The first matching button claude.ai shows, else null.
+  function shownButton(selector, root) {
+    var buttons;
+    try { buttons = (root || document).querySelectorAll(selector); } catch (e) { return null; }
+    for (var i = 0; i < buttons.length; i++) {
+      if (shownByClaude(buttons[i])) return buttons[i];
+    }
+    return null;
+  }
+  // claude.ai's button that stops the answer being written (not the one of
+  // dictation, recording or reading aloud), when shown and usable.
   function stopButton(root) {
     var buttons = root ? root.querySelectorAll("button[aria-label]") : [];
     for (var i = 0; i < buttons.length; i++) {
-      if (/^stop/i.test(buttons[i].getAttribute("aria-label"))) return buttons[i];
+      var label = buttons[i].getAttribute("aria-label");
+      if (!/^stop/i.test(label) || /dictation|recording|reading|loading/i.test(label)) continue;
+      if (!buttons[i].disabled && shownByClaude(buttons[i])) return buttons[i];
     }
     return null;
   }
@@ -2019,12 +2058,13 @@
           if (mode === null) editor.removeAttribute("inputmode");
           else editor.setAttribute("inputmode", mode);
         }
+        if (result !== "ok") clearEditor(editor);
         record("chrome", "send (" + how + "): " + result);
         nativeSetTimeout(function () { sending = false; }, 1500);
         resolve(result);
       };
       var attempt = function () {
-        var send = find('button[aria-label="Send message"]');
+        var send = shownButton(SEND) || find(SEND);
         if (send && !send.disabled) {
           send.click();
           finish("ok");

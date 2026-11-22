@@ -422,6 +422,15 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   `check-claude-modules.js` on the phone's entry `index-C0Y41AG9.js`: 5,384 modules OK.
 - "Old UI behind the new UI in some scenarios": no screenshots yet; the sidebar fixes
   above cover one likely case.
+- 21b (Logan: after one message the native send button is greyed out, no second send):
+  claude.ai (22 Nov code) shows only "Stop response" where the send button was while
+  Claude answers with an empty draft, so "missing send button" made the app not ready:
+  buttons greyed out, and after 15 s the bars stepped aside (claude.ai's UI showed).
+  Now the shown "Stop response" next to the editor stands in for the send button; buttons
+  count only when claude.ai shows them (`shownByClaude`: not hidden / see-through /
+  aria-hidden / inert on the way up to the app's own mark), so kept-but-hidden stop
+  buttons no longer mean "answering". Typed text shows send even while Claude answers;
+  a failed send takes its text back out of claude.ai's box.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
