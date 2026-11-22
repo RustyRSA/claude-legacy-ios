@@ -414,8 +414,14 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   cover does that job); `localStorage.__appEarlyBox` is deleted once.
 - Debug log: "on screen now" marks controls the app hides "(hidden)" and ones under the
   native top bar; launch section names claude.ai's entry file.
-- Not checked on device. "Old UI behind the new UI in some scenarios": no screenshots
-  yet; the sidebar fixes above cover one likely case.
+- Installed 22 Nov (`450db35`, after the Windows ssh-agent was restarted: it is set to
+  Manual and stops when the PC restarts; the phone moved between .218 / .161 / .94 and
+  was found with `ssh-keyscan -f` over the subnet, matched by its ed25519 host key).
+  Logan: "all seems to be working". Log: voice socket opened (no MIC_FLOW error),
+  interactive time now measured (2.2 s), first launch after install 4.0 s.
+  `check-claude-modules.js` on the phone's entry `index-C0Y41AG9.js`: 5,384 modules OK.
+- "Old UI behind the new UI in some scenarios": no screenshots yet; the sidebar fixes
+  above cover one likely case.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
@@ -704,7 +710,7 @@ Updated 22 Nov 2026 (round 21). Solved items were removed; see the rounds above.
 
 | Item | Status |
 |---|---|
-| Voice mode after claude.ai's 20–22 Nov update | Transpiler fixed in round 21; not yet tried on the phone |
+| Voice mode after claude.ai's 20–22 Nov update | Fixed in round 21 (transpiler), works on the phone |
 | "Old UI behind the new UI in some scenarios" (Logan, 22 Nov) | Needs screenshots. Round 21 fixed claude.ai's own sidebar (edge swipe) under the bars. Debug log "on screen now" now marks hidden controls |
 | + menu and chat "..." menu | Still claude.ai's own menus (they open above the native bar). Native like the model menu if wanted |
 | Voice mode screen | claude.ai's own screen (the native bar steps aside). Native skin only if Logan asks (see round 20 rule) |
