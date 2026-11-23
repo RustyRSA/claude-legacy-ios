@@ -196,10 +196,14 @@ main() {
   [ "$PHONE_USER" = root ] && SUDO=""
 
   step "Copying to the iPhone ($PHONE)"
-  scp -q "$IPA" "$PHONE:$REMOTE_IPA" || die "Copy failed. Is the phone awake, on the same network, with SSH running? If it only accepts your key now, run once with: --phone root@<address>"
+  # Without a terminal (run by Claude Code) nothing can type a passphrase: fail at
+  # once instead of waiting for ever, e.g. when the Windows ssh-agent has stopped.
+  local BATCH=()
+  [ -t 0 ] || BATCH=(-o BatchMode=yes -o ConnectTimeout=10)
+  scp -q "${BATCH[@]}" "$IPA" "$PHONE:$REMOTE_IPA" || die "Copy failed. Is the phone awake, on the same network, with SSH running? Without a terminal: is ssh-agent running with the key (ssh-add -l)? If it only accepts your key now, run once with: --phone root@<address>"
 
   step "Installing with TrollStore${SUDO:+ (sudo may ask for the mobile user password)}"
-  if ssh -t "$PHONE" "helper=\$(${SUDO}find /var/containers/Bundle/Application -maxdepth 3 -name trollstorehelper | head -n 1); \
+  if ssh -t "${BATCH[@]}" "$PHONE" "helper=\$(${SUDO}find /var/containers/Bundle/Application -maxdepth 3 -name trollstorehelper | head -n 1); \
       [ -n \"\$helper\" ] || { echo 'TrollStore helper not found'; exit 1; }; \
       ${SUDO}\"\$helper\" install $REMOTE_IPA && rm -f $REMOTE_IPA"; then
     echo
