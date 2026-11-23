@@ -336,6 +336,8 @@ API_AVAILABLE(ios(15.0))
 @property (nonatomic, copy) void (^onBarInset)(CGFloat inset);
 /// Height of the message bar now, with a text of several lines.
 @property (nonatomic, readonly) CGFloat barHeight;
+/// The message bar (it rides on the keyboard): the page ends at its top.
+@property (nonatomic, readonly) UIView *messageBar;
 /// The page's edge colours, and whether the page is dark (the controls then use
 /// the dark system colours whatever the phone is set to).
 - (void)setTopColor:(UIColor *)top bottomColor:(UIColor *)bottom dark:(BOOL)dark;
@@ -708,6 +710,10 @@ API_AVAILABLE(ios(15.0))
 
 /// The message bar with one line of text: 4 + model row 30 + 2 + text 36 + 8.
 static const CGFloat kMessageBarHeight = 80;
+
+- (UIView *)messageBar {
+    return _bottomBar;
+}
 
 - (CGFloat)barHeight {
     return kMessageBarHeight + MAX(_textHeight.constant - 36, 0);
@@ -1116,6 +1122,9 @@ static const CGFloat kMessageBarHeight = 80;
 @property (nonatomic, strong, nullable) NSURL *launchURL;
 /// The page's bottom edge: the safe area's, or the top of the native message bar.
 @property (nonatomic, strong, nullable) NSLayoutConstraint *webBottomConstraint;
+/// The page's bottom at the top of the native message bar (active while the bar
+/// is shown): the page ends right above the bar, also when the keyboard is up.
+@property (nonatomic, strong, nullable) NSLayoutConstraint *webBottomToBar;
 
 @end
 
@@ -1248,11 +1257,6 @@ static const CGFloat kMessageBarHeight = 80;
                                              selector:@selector(audioRouteChanged:)
                                                  name:AVAudioSessionRouteChangeNotification
                                                object:nil];
-    // The page gets room at the end of its message list for the app's keyboard.
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(keyboardWillChangeFrame:)
-                                                 name:UIKeyboardWillChangeFrameNotification
-                                               object:nil];
 
     // Going to the background and back: logged, cookies saved, and a page that
     // iOS stopped in the meantime is reloaded.
@@ -1336,7 +1340,23 @@ static const CGFloat kMessageBarHeight = 80;
             [weakSelf runChromeAction:name argument:argument];
         };
         chrome.onBarInset = ^(CGFloat inset) {
-            weakSelf.webBottomConstraint.constant = -inset;
+            typeof(self) strongSelf = weakSelf;
+            if (strongSelf == nil || strongSelf.webBottomConstraint == nil) {
+                return;
+            }
+            if (strongSelf.webBottomToBar == nil) {
+                // Fallback: a fixed space for the bar (keyboard not followed).
+                strongSelf.webBottomConstraint.constant = -inset;
+                return;
+            }
+            BOOL toBar = inset > 0;
+            if (toBar) {
+                strongSelf.webBottomConstraint.active = NO;
+                strongSelf.webBottomToBar.active = YES;
+            } else {
+                strongSelf.webBottomToBar.active = NO;
+                strongSelf.webBottomConstraint.active = YES;
+            }
         };
         chrome.onMenuItems = ^(NSString *menu, void (^completion)(NSArray<NSDictionary *> *)) {
             [weakSelf askPage:@"menuItems" argument:menu completion:^(NSString *answer) {
@@ -1385,6 +1405,9 @@ static const CGFloat kMessageBarHeight = 80;
         };
         [self takeOverWebViewBottom];
         [self.view insertSubview:chrome aboveSubview:self.webView];
+        if (self.webBottomConstraint != nil) {
+            self.webBottomToBar = [self.webView.bottomAnchor constraintEqualToAnchor:chrome.messageBar.topAnchor];
+        }
         [NSLayoutConstraint activateConstraints:@[
             [chrome.topAnchor constraintEqualToAnchor:self.view.topAnchor],
             [chrome.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
@@ -1512,24 +1535,6 @@ static const CGFloat kMessageBarHeight = 80;
                 [[strongSelf topPresenter] presentViewController:alert animated:YES completion:nil];
             }
         }];
-    }
-}
-
-/// The page does not shrink for the app's keyboard, so it is told how much of it
-/// the keyboard covers (points, with the page's width in points to convert).
-- (void)keyboardWillChangeFrame:(NSNotification *)note {
-    if (@available(iOS 15.0, *)) {
-        NativeChrome *chrome = (NativeChrome *)self.nativeChrome;
-        if (chrome == nil || chrome.hidden) {
-            return;
-        }
-        CGRect keyboard = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
-        CGRect page = [self.webView convertRect:self.webView.bounds toView:nil];
-        // The message bar sits on top of the keyboard: the page is covered from
-        // the bar's top edge down.
-        CGFloat covered = chrome.editing ? MAX(0, CGRectGetMaxY(page) - (CGRectGetMinY(keyboard) - chrome.barHeight)) : 0;
-        NSString *argument = [NSString stringWithFormat:@"%.0f,%.0f", covered, CGRectGetWidth(page)];
-        [self runChromeAction:@"keyboard" argument:argument];
     }
 }
 

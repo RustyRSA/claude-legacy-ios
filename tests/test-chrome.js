@@ -85,9 +85,10 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.ok(!editor.hasAttribute("inputmode"), "inputmode restored");
   assert.strictEqual(await C.run("send", "   "), "nothing to send");
 
-  // Keyboard room: accepted, and removed again with 0.
-  assert.ok(["ok", "no message list"].includes(C.run("keyboard", "300,393")));
-  assert.strictEqual(C.run("keyboard", "0,393"), "ok");
+  // The room claude.ai keeps for its own box is zeroed while the app is in use.
+  const css = Array.prototype.map.call(doc.querySelectorAll("style"), (st) => st.textContent).join("");
+  assert.ok(/--composer-banners-composer-h:0px!important/.test(css), "spacer variable zeroed");
+  assert.ok(/room under the messages:/.test(p.w.__appDebugLog()), "room summary in the log");
 
   // Where the page can take a paste: the text arrives without focusing claude.ai's
   // box (the app's keyboard stays up).

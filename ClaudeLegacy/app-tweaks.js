@@ -1815,6 +1815,7 @@
       incognito: !!find('button[aria-label="Use incognito"]'),
       more: !!c.more
     };
+    if (ready && !sidebar && (!anchor.el || !anchor.el.isConnected)) anchorScroller();
     var key = JSON.stringify(chromeState);
     if (key === chromeSent) return;
     chromeSent = key;
@@ -2081,10 +2082,29 @@
     });
   }
 
-  // The app's keyboard covers the bottom of the page (the page itself does not
-  // shrink for it), so claude.ai's message list gets that much room at its end,
-  // and stays scrolled to the end when it was there. arg: "points,viewWidthPoints".
-  var keyboardScroller = null;
+  // The page now ends at the top of the app's message bar, which rides on the
+  // keyboard, so the page gets shorter while the keyboard is up. The message list
+  // keeps its bottom edge where it was (the last lines stay just above the bar),
+  // as in other chat apps: its scroll position moves by the change in height.
+  var anchor = { el: null, h: 0 };
+  function anchorScroller() {
+    if (anchor.el && anchor.el.isConnected) return anchor.el;
+    var el = messageScroller();
+    anchor = { el: el, h: el ? el.clientHeight : 0 };
+    return el;
+  }
+  window.addEventListener("resize", function () {
+    if (!NATIVE_CHROME || !chromeState.ready) return;
+    var el = anchor.el && anchor.el.isConnected ? anchor.el : null;
+    if (!el) {
+      anchorScroller();
+      return;
+    }
+    var h = el.clientHeight;
+    var delta = anchor.h - h;
+    anchor.h = h;
+    if (delta) el.scrollTop += delta;
+  });
   function messageScroller() {
     var start = find('button[aria-label="Copy"]') || chromeControls().composer;
     for (var el = start; el && el !== document.body; el = el.parentElement) {
@@ -2092,24 +2112,6 @@
       if ((overflow === "auto" || overflow === "scroll") && el.scrollHeight > el.clientHeight) return el;
     }
     return document.scrollingElement;
-  }
-  function setKeyboardRoom(arg) {
-    var parts = String(arg).split(",");
-    var points = Number(parts[0]) || 0;
-    var width = Number(parts[1]) || window.innerWidth;
-    var px = Math.round(points * window.innerWidth / width);
-    if (keyboardScroller && (!px || !keyboardScroller.isConnected)) {
-      keyboardScroller.style.removeProperty("padding-bottom");
-      keyboardScroller = null;
-    }
-    if (!px) return "ok";
-    var scroller = messageScroller();
-    if (!scroller) return "no message list";
-    var atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
-    scroller.style.setProperty("padding-bottom", px + "px", "important");
-    keyboardScroller = scroller;
-    if (atEnd) scroller.scrollTop = scroller.scrollHeight;
-    return "ok";
   }
 
   window.__appChrome = {
@@ -2191,7 +2193,6 @@
           break;
         case "stop": result = press(c.composer && stopButton(c.composer), "stop button"); break;
         case "send": return sendText(String(arg || ""));
-        case "keyboard": return setKeyboardRoom(arg);
         default: result = "unknown action " + name;
       }
       if (result !== "ok") record("chrome", name + ": " + result);
@@ -2210,6 +2211,10 @@
       "html.app-native-chrome [data-app-collapsed]{height:0!important;min-height:0!important;max-height:0!important;" +
       "overflow:hidden!important;padding-top:0!important;padding-bottom:0!important;margin-top:0!important;" +
       "margin-bottom:0!important;border-width:0!important}" +
+      // claude.ai measures this to size the spacer under the messages
+      "html.app-native-chrome [data-app-collapsed] [data-composer-card-holder]{height:0!important;" +
+      "min-height:0!important;max-height:0!important;overflow:hidden!important}" +
+      "html.app-native-chrome *{--composer-banners-composer-h:0px!important}" +
       'html.app-menu-quiet [role="menu"],html.app-menu-quiet [role="listbox"]{opacity:0!important}';
     (document.head || document.documentElement).appendChild(style);
     var pending = null;
@@ -2235,10 +2240,28 @@
     updateChrome();
   }
 
+  function bottomRoomSummary() {
+    try {
+      var held = [];
+      var all = document.querySelectorAll("[style*='--composer-banners']");
+      for (var i = 0; i < all.length && i < 4; i++) {
+        held.push(all[i].tagName.toLowerCase() + " " + all[i].getAttribute("style").replace(/\s+/g, " ").slice(0, 120));
+      }
+      var rooms = Array.prototype.slice.call(document.querySelectorAll("[data-composer-banners-room]"), 0, 3).map(function (el) {
+        return Math.round(el.getBoundingClientRect().height) + " px";
+      });
+      var sc = anchor.el && anchor.el.isConnected ? anchor.el : null;
+      return "  room under the messages: spacer " + (rooms.join(", ") || "none") + "; set on " + (held.join(" | ") || "nothing") +
+        (sc ? "; list padding-bottom " + getComputedStyle(sc).paddingBottom + ", " +
+          Math.round(sc.scrollHeight - sc.scrollTop - sc.clientHeight) + " px below the visible part" : "");
+    } catch (e) {
+      return "  room under the messages: " + describe(e);
+    }
+  }
   function chromeSummary() {
     if (!NATIVE_CHROME) return ["native controls: off"];
     var s = chromeState;
-    return ["chat list: " + chatListCount + " chats handed to the app in " + chatListPosts + " reports",
+    return ["chat list: " + chatListCount + " chats handed to the app in " + chatListPosts + " reports", bottomRoomSummary(),
       "native controls: on, " + (s.ready ? "in use" : "not in use (" + s.why + ")") +
       (s.ready ? ", page " + s.page + ", sidebar " + (s.sidebarOpen ? "open" : "closed") +
         ", answering " + (s.streaming ? "yes" : "no") + ", model " + (s.model || "?") + (s.effort ? " " + s.effort : "") : "")];

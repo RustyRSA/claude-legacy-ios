@@ -437,7 +437,21 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   does not go through claude.ai's menu: `pickFiles` presses claude.ai's hidden
   `input[type=file]` (in the card, else the `multiple` one) straight from the native
   tap, so iOS's own picker opens (a press after the background menu round trip may not
-  count as a tap); falls back to the menu pick. Not checked on device.
+  count as a tap); falls back to the menu pick. Installed (`bb12506`); Logan 23 Nov: two
+  messages in a row work, + menu native works, file picker works.
+- 21d (screenshots 23 Nov): (1) keyboard down: empty gap (~140 px) under the last
+  message. claude.ai keeps a spacer in the message list (`[data-composer-banners-room]`,
+  height `var(--composer-banners-h)` = banners + `--composer-banners-composer-h`, the
+  measured height of its message box, set as inline style). The box is collapsed by the
+  app but the measured part was not, so the room stayed. Now `--composer-banners-composer-h`
+  is forced to 0 (`!important` beats the inline value) and `[data-composer-card-holder]`
+  inside the collapsed card is collapsed too. Debug log: "room under the messages" line.
+  (2) keyboard up: the page kept its height, so the conversation ran on behind the bar and
+  keyboard (round 12e's padding did not scroll it into view). Now the web view's bottom is
+  pinned to the native message bar's top while the bar is shown (`webBottomToBar`, the bar
+  rides on keyboardLayoutGuide), so the page really gets shorter; on `resize` the message
+  list keeps its bottom edge (`scrollTop += old height - new height`). The keyboard
+  padding (`keyboard` action, `-keyboardWillChangeFrame:`) is gone.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
