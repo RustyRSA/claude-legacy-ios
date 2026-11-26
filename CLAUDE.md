@@ -451,7 +451,24 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   pinned to the native message bar's top while the bar is shown (`webBottomToBar`, the bar
   rides on keyboardLayoutGuide), so the page really gets shorter; on `resize` the message
   list keeps its bottom edge (`scrollTop += old height - new height`). The keyboard
-  padding (`keyboard` action, `-keyboardWillChangeFrame:`) is gone.
+  padding (`keyboard` action, `-keyboardWillChangeFrame:`) is gone. Installed 23 Nov (`9241807`).
+- update.sh: without a terminal (Claude Code) scp/ssh run with BatchMode, so a stopped
+  ssh-agent fails at once instead of hanging on a passphrase prompt (`1546fe0`).
+
+### Round 22 (26 Nov 2026) — voice mode after claude.ai's update
+- Logan: voice mode not working. ssh-agent was stopped again (no log). claude.ai entry
+  `index-TEgdicZr.js`: `check-claude-modules.js` 5,585 modules OK, so not the transpiler.
+- Cause: claude.ai removed the voice session's `usePcm` option (`usePcm:S=!1,preferredBackend:`,
+  which the app's `PCM_DEFAULT` patch flipped). Voice now always records with the default
+  recorder settings (WebCodecs Opus / MediaRecorder webm-Opus, neither on iOS 16) and tells
+  the server `inputEncoding:"opus"`. Dictation is unaffected (it picks linear16 itself
+  when Opus is missing).
+- Fix (`app-tweaks.js`, two patches applied together to the voice session module):
+  `VOICE_ENCODING` adds `inputEncoding:"linear16",inputSampleRate:16e3` to the call settings
+  after `clientAec:…` (before `outputFormat`); `VOICE_RECORDER` adds `usePcm:!0` to
+  `new Qt({sampleRate:e.inputSampleRate,channels:e.inputChannels,…`. Both match once in
+  `ccc68ce7f-rlplIK8G.js`; the old `PCM_DEFAULT` stays for older builds. Test:
+  `tests/test-voice-patches2.js` (claude.ai's own excerpt, run before and after).
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,

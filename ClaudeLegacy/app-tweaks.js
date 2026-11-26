@@ -187,6 +187,16 @@
   // With usePcm the session records through ScriptProcessor and tells the server
   // it is sending 16 kHz linear16 audio instead of Opus.
   var PCM_DEFAULT = /(usePcm\s*:\s*[\w$]+\s*=\s*)!1(\s*,\s*preferredBackend\s*:)/;
+  // claude.ai's code since 23-26 Nov has no usePcm option for voice mode any more:
+  // it always records Opus, which iOS 16 cannot. Two patches put PCM back:
+  // the call settings sent to the server ask for 16 kHz linear16 ...
+  //   ...Jo(this.unsentVoiceSettings),voice:this.voice,clientAec:B,outputFormat:…
+  //   ...Jo(this.unsentVoiceSettings),voice:this.voice,clientAec:B,inputEncoding:"linear16",inputSampleRate:16e3,outputFormat:…
+  var VOICE_ENCODING = /(\.\.\.[\w$]+\(this\.unsentVoiceSettings\),voice:this\.voice,clientAec:[\w$]+,)(?!inputEncoding)/;
+  // ... and the voice recorder records PCM:
+  //   new Qt({sampleRate:e.inputSampleRate,channels:e.inputChannels,preferredBackend:…
+  //   new Qt({sampleRate:e.inputSampleRate,channels:e.inputChannels,usePcm:!0,preferredBackend:…
+  var VOICE_RECORDER = /(new [\w$]+\(\{sampleRate:[\w$]+\.inputSampleRate,channels:[\w$]+\.inputChannels,)(preferredBackend:)/;
 
   window.__appPatchModule = function (code, file) {
     if (!appStarted) launch.firstModule = performance.now();
@@ -202,6 +212,12 @@
         code = code.replace(PCM_DEFAULT, "$1!0$2");
         patchStatus.pcmMode = "enabled (" + file + ")";
         record("app", "voice: PCM recording mode enabled in " + file);
+      }
+      if (code.indexOf("unsentVoiceSettings") !== -1 && VOICE_ENCODING.test(code) && VOICE_RECORDER.test(code)) {
+        code = code.replace(VOICE_ENCODING, '$1inputEncoding:"linear16",inputSampleRate:16e3,')
+          .replace(VOICE_RECORDER, "$1usePcm:!0,$2");
+        patchStatus.pcmMode = "enabled, settings and recorder (" + file + ")";
+        record("app", "voice: PCM recording (settings and recorder) enabled in " + file);
       }
     } catch (e) {
       record("app", "voice patch failed in " + file + ": " + describe(e));
