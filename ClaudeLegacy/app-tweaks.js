@@ -1078,6 +1078,147 @@
     postChats(chats, "the page's links");
   }
 
+  // ---- Chat copies (round 24) -------------------------------------------------
+  // When claude.ai opens a chat it fetches the chat with its messages
+  // (chat_conversations/<id>?tree=True&rendering_mode=messages). With "Chat
+  // copies" on, the text of the messages it shows (the branch on screen: from
+  // the current last message back through the parents) goes to the app, which
+  // keeps recent chats on the phone and shows one at once from its chat list,
+  // before claude.ai has loaded. No request of the app's own. Text, names and
+  // file names never go to the debug log (counts and field names only).
+  var CHAT_COPIES = settings.chatCopies === true;
+  var CHAT_PATH = /^\/api\/organizations\/…\/chat_conversations(_v\d+)?\/…$/;
+  var ROOT_MESSAGE = "00000000-0000-4000-8000-000000000000";
+  var COPY_CHARS = 1500000;      // per chat; the newest messages are kept
+  var MESSAGE_CHARS = 200000;
+  var copySent = {};
+  var copyNotes = 0;
+  function chatIdOf(url) {
+    try {
+      var id = new URL(url, location.href).pathname.split("/").pop();
+      return CHAT_ID.test(id) ? id.toLowerCase() : "";
+    } catch (e) {
+      return "";
+    }
+  }
+  // One message as text: its text blocks; tools, artifacts and files as a short
+  // mark in brackets; thinking and tool results left out.
+  function copyText(m) {
+    var parts = [];
+    var add = function (text) { if (text && parts.indexOf(text) === -1) parts.push(text); };
+    if (Array.isArray(m.content) && m.content.length) {
+      m.content.forEach(function (b) {
+        if (!b || typeof b !== "object") return;
+        if (b.type === "text" && typeof b.text === "string") {
+          parts.push(b.text);
+        } else if (b.type === "tool_use" && typeof b.name === "string") {
+          var input = b.input && typeof b.input === "object" ? b.input : {};
+          var title = typeof input.title === "string" ? input.title.slice(0, 100) : "";
+          add("[" + (b.name === "artifacts" ? "Artifact" : "Used " + b.name.replace(/_/g, " ")) + (title ? ": " + title : "") + "]");
+        }
+      });
+    } else if (typeof m.text === "string") {
+      parts.push(m.text);
+    }
+    ["files", "files_v2", "attachments"].forEach(function (key) {
+      (Array.isArray(m[key]) ? m[key] : []).forEach(function (f) {
+        var name = f && (f.file_name || f.name);
+        if (typeof name === "string" && name) add("[File: " + name.slice(0, 100) + "]");
+      });
+    });
+    return parts.join("\n\n").trim();
+  }
+  // -> {id, name, updated, earlier, messages: [{role, text, at}]}, or null.
+  function chatCopyFrom(json, id) {
+    if (!json || typeof json !== "object" || !Array.isArray(json.chat_messages)) return null;
+    var list = json.chat_messages.filter(function (m) { return m && typeof m === "object"; });
+    var byId = {};
+    var tree = false;
+    list.forEach(function (m) {
+      if (typeof m.uuid === "string") byId[m.uuid] = m;
+      if (typeof m.parent_message_uuid === "string") tree = true;
+    });
+    var byIndex = list.slice().sort(function (a, b) { return (Number(a.index) || 0) - (Number(b.index) || 0); });
+    var path = byIndex;
+    if (tree && byIndex.length) {
+      // The branch on screen; without a known last message, the newest one.
+      var leaf = byId[json.current_leaf_message_uuid] || byIndex[byIndex.length - 1];
+      var seen = {};
+      path = [];
+      for (var m = leaf; m && !seen[m.uuid] && path.length < 5000; m = m.parent_message_uuid === ROOT_MESSAGE ? null : byId[m.parent_message_uuid]) {
+        seen[m.uuid] = true;
+        path.unshift(m);
+      }
+    }
+    var messages = [];
+    var chars = 0;
+    var earlier = false;
+    for (var i = path.length - 1; i >= 0; i--) {
+      var text = copyText(path[i]);
+      if (!text) continue;
+      if (text.length > MESSAGE_CHARS) text = text.slice(0, MESSAGE_CHARS) + "\n[…]";
+      if (chars + text.length > COPY_CHARS) {
+        earlier = true;
+        break;
+      }
+      chars += text.length;
+      messages.unshift({ role: path[i].sender === "human" ? "user" : "assistant", text: text,
+        at: Date.parse(path[i].created_at || "") || 0 });
+    }
+    if (!messages.length) return null;
+    return { id: id, name: String(json.name || "").trim().slice(0, 200), updated: Date.parse(json.updated_at || "") || 0,
+      earlier: earlier, messages: messages, chars: chars };
+  }
+  function postChatCopy(json, id) {
+    var copy = chatCopyFrom(json, id);
+    if (!copy) {
+      if (copyNotes++ < 3) {
+        record("chrome", "chat copy: no messages found (fields: " +
+          (json && typeof json === "object" ? Object.keys(json).slice(0, 30).join(", ") : typeof json) + ")");
+      }
+      return;
+    }
+    var last = copy.messages[copy.messages.length - 1];
+    var signature = copy.messages.length + ":" + copy.chars + ":" + last.at;
+    if (copySent[id] === signature) return; // claude.ai fetched the same again
+    copySent[id] = signature;
+    if (copyNotes++ < 12) {
+      record("chrome", "chat copy: " + copy.messages.length + " messages, " + copy.chars + " characters" +
+        (copy.earlier ? " (older ones left out)" : ""));
+    }
+    delete copy.chars;
+    try {
+      window.webkit.messageHandlers.chatList.postMessage({ copy: copy });
+    } catch (e) {}
+  }
+  function noteChatResponse(response, url) {
+    var id = chatIdOf(url);
+    if (!id) return;
+    if (response.status === 404) {
+      // Deleted in claude.ai: its copy goes too.
+      try { window.webkit.messageHandlers.chatList.postMessage({ gone: id }); } catch (e) {}
+      return;
+    }
+    if (response.status !== 200) return;
+    var body = response.clone();
+    // Read a moment later, so it does not compete with claude.ai drawing the chat.
+    nativeSetTimeout(function () {
+      body.text().then(function (text) {
+        if (text.length > 8000000) {
+          record("chrome", "chat copy: too large to keep (" + Math.round(text.length / 1048576) + " MB)");
+          return;
+        }
+        var t = performance.now();
+        try {
+          postChatCopy(JSON.parse(text), id);
+        } catch (e) {
+          record("chrome", "chat copy: not read: " + describe(e));
+        }
+        noteWork("chat copy", t);
+      }, function () {});
+    }, 1500);
+  }
+
   var nativeFetch = window.fetch;
   if (typeof nativeFetch === "function") {
     window.fetch = function (input, init) {
@@ -1092,6 +1233,7 @@
           if (NATIVE_CHROME && method === "GET" && response.status === 200 && CHAT_LIST_PATH.test(path)) {
             response.clone().json().then(noteChatList, function () {});
           }
+          if (NATIVE_CHROME && CHAT_COPIES && method === "GET" && CHAT_PATH.test(path)) noteChatResponse(response, url);
         }, function (error) {
           noteApi(path, method, startedAt, "failed", null, url);
           noteFailedRequest(path, method, startedAt, error, init);
@@ -2271,6 +2413,7 @@
 
   window.__appChrome = {
     noteChatList: noteChatList,
+    chatCopyFrom: chatCopyFrom,
     chatGroupsFromPage: chatGroupsFromPage,
     run: function (name, arg) {
       // claude.ai's controls are searched for only by the actions that need
