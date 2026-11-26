@@ -157,7 +157,8 @@
         ", diagnostics " + (DIAGNOSTICS ? "on" : "off (turn on in Advanced for timings of taps, frames and stalls)") +
         ", loading " + (window.__appLoader ? window.__appLoader.mode +
           (window.__appLoader.mode === "fast" ? (window.__appLoader.inPage() ? " (in page)" : " (through the app)") : "") : "?")
-    ].concat(chromeSummary(), launchSummary(), chatSummary(), tapSummary(), responsivenessSummary(), screenInventory(), ["----"]);
+    ].concat(chromeSummary(), launchSummary(), chatSummary(), tapSummary(), responsivenessSummary(), appWorkSummary(),
+      screenInventory(), ["----"]);
     return header.concat(lines).join("\n");
   };
 
@@ -454,10 +455,20 @@
   // other scroll area holding the message box) from rubber-banding.
   var COMPOSER = 'div[contenteditable="true"], textarea, [data-testid="chat-input"]';
   var lastComposerCheck = 0;
+  var pinnedComposer = null;
+  // Runs at the start of a tap, so it must not lay the page out for nothing:
+  // not while the app's bar is in use (claude.ai's box is hidden, with no
+  // height), and not again for a box already done (round 23).
   function pinComposer() {
+    if (chromeState.ready || (pinnedComposer && pinnedComposer.isConnected)) return;
     var now = Date.now();
     if (now - lastComposerCheck < 1000) return;
     lastComposerCheck = now;
+    var t = performance.now();
+    pinComposerNow();
+    noteWork("composer pin", t);
+  }
+  function pinComposerNow() {
     var editors = document.querySelectorAll(COMPOSER);
     var composer = null;
     var lowest = -Infinity;
@@ -475,6 +486,7 @@
         el.__appPinned = true;
       }
     }
+    pinnedComposer = composer;
   }
 
   // Colours ------------------------------------------------------------------
@@ -538,7 +550,12 @@
   var candidate = "";
   var confirmTimer = null;
   function reportAppearance() {
-    if (!document.body) return;
+    if (!document.body || document.visibilityState === "hidden") return;
+    var t = performance.now();
+    sampleEdges();
+    noteWork("edge colours", t);
+  }
+  function sampleEdges() {
     var report = null;
     try {
       var height = document.documentElement.clientHeight || window.innerHeight;
@@ -644,6 +661,42 @@
       else frameWatchRunning = false;
     };
     window.requestAnimationFrame(frame);
+  }
+
+  // The app's own work on the page's main thread: its observers and checks
+  // (always measured, two clock reads per run; claude.ai's and the polyfills'
+  // are measured above, with Diagnostics on). In the first 15 s it competes
+  // with claude.ai's start; later with taps and scrolling.
+  var appWork = {};
+  var appWorkNames = [];
+  function noteWork(name, since) {
+    var spent = performance.now() - since;
+    var w = appWork[name];
+    if (!w) {
+      w = appWork[name] = { runs: 0, ms: 0, worst: 0, early: 0 };
+      appWorkNames.push(name);
+    }
+    w.runs++;
+    w.ms += spent;
+    if (spent > w.worst) w.worst = spent;
+    if (since < 15000) w.early += spent;
+  }
+  function timedWork(name, fn) {
+    return function () {
+      var t = performance.now();
+      try {
+        return fn.apply(this, arguments);
+      } finally {
+        noteWork(name, t);
+      }
+    };
+  }
+  function appWorkSummary() {
+    if (!appWorkNames.length) return [];
+    return ["app's own page work (ms in the first 15 s / in all): " + appWorkNames.map(function (name) {
+      var w = appWork[name];
+      return name + " " + w.runs + " runs " + round(w.early) + "/" + round(w.ms) + " (worst " + round(w.worst) + ")";
+    }).join(", ")];
   }
 
   function round(n) { return Math.round(n); }
@@ -773,8 +826,23 @@
   var chatOpens = [];
   var chatOpen = null;
   var lastMutationAt = 0;
+  // When the screen last changed: watched only while a chat opens (it used to
+  // see every change of every page, each letter of a reply included).
+  var chatOpenWatcher = null;
+  function watchChatOpen(on) {
+    try {
+      if (!chatOpenWatcher && on && document.body && typeof NativeObserver === "function") {
+        chatOpenWatcher = new NativeObserver(function () { lastMutationAt = performance.now(); });
+      }
+      if (!chatOpenWatcher) return;
+      if (on) chatOpenWatcher.observe(document.body, { childList: true, subtree: true, characterData: true });
+      else chatOpenWatcher.disconnect();
+    } catch (e) {}
+  }
   function startChatOpen(href, tappedAt) {
     chatOpen = { href: href, at: tappedAt || performance.now(), routeAt: 0, dataAt: 0, apiMs: 0, settledAt: 0 };
+    lastMutationAt = performance.now();
+    watchChatOpen(true);
     var current = chatOpen;
     var check = function () {
       if (chatOpen !== current) return;
@@ -793,7 +861,10 @@
     setTimeout(check, 100);
   }
   function finishChatOpen(c) {
-    if (chatOpen === c) chatOpen = null;
+    if (chatOpen === c) {
+      chatOpen = null;
+      watchChatOpen(false);
+    }
     var part = function (label, at) { return at ? label + " +" + Math.round(at - c.at) + " ms" : label + " (not seen)"; };
     var line = [part("address", c.routeAt), part("data", c.dataAt) + (c.apiMs ? " (request " + Math.round(c.apiMs) + " ms)" : ""),
       part("screen settled", c.settledAt)].join(", ") + chatOpenWork(c);
@@ -837,6 +908,7 @@
     if (location.pathname === lastPath) return;
     lastPath = location.pathname;
     if (chatOpen && !chatOpen.routeAt) chatOpen.routeAt = performance.now();
+    lookForSidebar();
     checkSignedOut();
   }
 
@@ -948,6 +1020,11 @@
   // What a section can hold: chats, artifacts, code sessions, projects.
   var ITEM_PATH = /^\/(chat|artifact|code|project)\/[\w\-\/]{1,120}$/;
   function chatGroupsFromPage() {
+    var t = performance.now();
+    readChatGroups();
+    noteWork("sidebar sections", t);
+  }
+  function readChatGroups() {
     var aside = find("aside");
     if (!aside) return;
     var nodes = aside.querySelectorAll("button, a[href]");
@@ -1173,7 +1250,8 @@
         seconds(lastRan) + ", last finished " + seconds(lastDone) + ", interactive " + seconds(launch.interactive) +
         ", send button " + seconds(launch.sendButton),
       "  transpiling " + Math.round(s.transpileMs) + " ms, downloading " + Math.round(s.fetchMs) + " ms, cache reads " +
-        Math.round(s.readMs) + " ms, workers " + s.workers + (s.workerError ? " (" + s.workerError + ")" : "") +
+        Math.round(s.readMs) + " ms summed" + (s.storeRequests ? " (" + s.storeRequests + " requests for " + s.storeModules +
+        " single modules)" : "") + ", workers " + s.workers + (s.workerError ? " (" + s.workerError + ")" : "") +
         ", cache saves failed " + s.putFailures + (s.putError ? " (" + s.putError + ")" : "") +
         ", old entries removed " + s.pruned + ", old caches removed " + s.cachesRemoved +
         ", downloads retried " + (s.retries || 0) + ", modules not loaded " + (s.loadFailures || 0) +
@@ -1485,8 +1563,14 @@
   function chromeStale() {
     if (pageKind() === "other") return false;
     if (!found || !found.composer) {
-      var editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]') || earlyField();
-      if (!editor) return false;
+      var editor = find(EDITOR) || find('.ProseMirror[contenteditable="true"]');
+      if (!editor) {
+        // A stand-in text field can only be told by its size, and measuring
+        // lays the page out: once per frame, just before it is drawn, instead
+        // of after every change while claude.ai builds its page (round 23).
+        earlyFieldBeforeFrame();
+        return false;
+      }
       if (find('button[aria-label="Send message"]')) return true;
       // The text box is drawn about a second before its buttons (video 13 Nov),
       // and drawn anew once or twice on the way (first a stand-in, then the real
@@ -1496,9 +1580,25 @@
       return !editor.closest("[data-app-hidden]");
     }
     // While claude.ai dictates its text box is gone on purpose (its sound
-    // display changes many times a second: no search for each change).
-    var textGone = !find(DICTATION_FINISH) && (!found.editor || !found.editor.isConnected);
+    // display changes many times a second: no search for each change). The
+    // page is searched for that button only when the text box is gone.
+    var textGone = (!found.editor || !found.editor.isConnected) && !find(DICTATION_FINISH);
     return found.path !== location.pathname || !found.composer.isConnected || textGone || !stillThere(found.topBar);
+  }
+  var earlyFrame = false;
+  function earlyFieldBeforeFrame() {
+    if (earlyFrame) return;
+    earlyFrame = true;
+    var check = function () {
+      earlyFrame = false;
+      if ((found && found.composer) || (earlySince && performance.now() - earlySince >= EARLY_MS)) return;
+      var t = performance.now();
+      var field = earlyField();
+      noteWork("chrome early box", t);
+      if (field && !field.closest("[data-app-hidden]")) updateChrome();
+    };
+    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(check);
+    else check();
   }
   function describeElement(el) {
     if (!el) return "none";
@@ -1786,8 +1886,27 @@
     record("chrome", "text in claude.ai's box moved to the app's bar: " + dictated.length + " characters");
   }
 
+  // claude.ai opens its sidebar only after a touch (its edge swipe; its own
+  // button is under the app's bar), on a new page or when the page changes
+  // size. Whether it is open is a hit test, which lays the page out, so it is
+  // made only for 3 s after one of those, not at every update while Claude
+  // writes (round 23).
+  var sidebarLookUntil = 0;
+  function lookForSidebar() {
+    sidebarLookUntil = performance.now() + 3000;
+  }
+  ["touchstart", "touchend"].forEach(function (type) {
+    document.addEventListener(type, lookForSidebar, { capture: true, passive: true });
+  });
+  window.addEventListener("resize", lookForSidebar);
+
   var lastHiddenFound = null;
   function updateChrome() {
+    var t = performance.now();
+    updateChromeNow();
+    noteWork("chrome state", t);
+  }
+  function updateChromeNow() {
     var c = chromeControls();
     var kind = pageKind();
     var own = kind !== "other" && inTakeover(c);
@@ -1796,7 +1915,8 @@
     if (!c.send) missing.push("send button");
     if (!c.composer) missing.push("message box card");
     var ready = kind !== "other" && (missing.length === 0 || own);
-    if (ready && !sidebarMode && sidebarOpen()) {
+    var lookSidebar = !chromeState.ready || chromeState.page !== kind || performance.now() < sidebarLookUntil;
+    if (ready && !sidebarMode && lookSidebar && sidebarOpen()) {
       // Opened by claude.ai itself (its edge swipe), not by the app's button.
       sidebarMode = { since: performance.now(), path: location.pathname, seenOpen: true };
       record("chrome", "sidebar opened by claude.ai");
@@ -2081,6 +2201,11 @@
       try {
         typeInto(editor, text);
       } catch (e) {
+        // Left as it was: "sending" stayed on for good before (round 23), so
+        // text turning up in claude.ai's box was never moved to the app again.
+        sending = false;
+        if (mode === null) editor.removeAttribute("inputmode");
+        else editor.setAttribute("inputmode", mode);
         return Promise.resolve("typing failed: " + describe(e));
       }
     }
@@ -2148,10 +2273,13 @@
     noteChatList: noteChatList,
     chatGroupsFromPage: chatGroupsFromPage,
     run: function (name, arg) {
-      var c = chromeControls();
+      // claude.ai's controls are searched for only by the actions that need
+      // them (the search walks the whole page; it ran before every tap's action).
+      var searched = null;
+      var controls = function () { return searched || (searched = chromeControls()); };
       var result;
       switch (name) {
-        case "sidebar": result = openSidebar(c); break;
+        case "sidebar": result = openSidebar(controls()); break;
         case "incognito": result = press(find('button[aria-label="Use incognito"]'), "incognito button"); break;
         case "newChat":
           var link = find('a[href="/new"]');
@@ -2172,7 +2300,7 @@
           break;
         case "menuItems": return menuItems(String(arg || ""));
         case "menuPick": return menuPick(String(arg || ""));
-        case "more": result = press(c.more, "chat menu"); break;
+        case "more": result = press(controls().more, "chat menu"); break;
         case "pickFiles":
           // claude.ai's own hidden file field, pressed at once (inside the tap):
           // iOS then shows its own picker (photo library, camera, files). Its
@@ -2180,7 +2308,8 @@
           var inputs = Array.prototype.slice.call(document.querySelectorAll('input[type="file"]')).filter(function (el) {
             return !el.disabled && !el.closest("aside");
           });
-          var input = inputs.filter(function (el) { return c.composer && c.composer.contains(el); })[0] ||
+          var composer = controls().composer;
+          var input = inputs.filter(function (el) { return composer && composer.contains(el); })[0] ||
             inputs.filter(function (el) { return el.multiple; })[0] || inputs[0];
           if (input) {
             input.click();
@@ -2190,7 +2319,7 @@
           }
           break;
         case "removeAttachment":
-          var attached = attachmentButtons(c)[Number(arg)];
+          var attached = attachmentButtons(controls())[Number(arg)];
           result = press(attached && attached.button, "remove button of that file");
           break;
         case "plus": result = press(find('button[aria-label="Add files, connectors, and more"]'), "+ button"); break;
@@ -2221,7 +2350,7 @@
           result = press(find('button[aria-label="Use voice mode"]'), name + " button");
           if (result !== "ok") takeover = null;
           break;
-        case "stop": result = press(c.composer && stopButton(c.composer), "stop button"); break;
+        case "stop": result = press(controls().composer && stopButton(controls().composer), "stop button"); break;
         case "send": return sendText(String(arg || ""));
         default: result = "unknown action " + name;
       }
@@ -2255,19 +2384,44 @@
     try {
       // An observer runs before the screen is drawn: when the controls have
       // just appeared or been replaced, they are hidden in that same moment.
-      new NativeObserver(function () {
-        if (chromeStale()) updateChrome();
-        else schedule();
-      }).observe(document.body, {
+      new NativeObserver(timedWork("chrome watcher", function (records) {
+        if (chromeStale()) {
+          updateChrome();
+          return;
+        }
+        // In use: only a change inside claude.ai's message box or top bar can
+        // change what the app shows. The message list changing while Claude
+        // writes (many times a second) no longer starts a search of the whole
+        // page each time; the check every second still follows it (round 23).
+        if (chromeState.ready && !sidebarMode && !takeover && found && found.composer &&
+            !touchesControls(records, [found.composer].concat(found.topBar || []))) return;
+        schedule();
+      })).observe(document.body, {
         childList: true, subtree: true, attributes: true, attributeFilter: ["aria-label", "disabled", "data-state"]
       });
     } catch (e) {}
     document.addEventListener("touchend", function () { nativeSetTimeout(updateChrome, 350); }, { passive: true, capture: true });
-    setInterval(updateChrome, 1000);
+    setInterval(function () {
+      if (document.visibilityState !== "hidden") updateChrome();
+    }, 1000);
     nativeSetTimeout(chatsFromPage, 8000);
     nativeSetTimeout(chatGroupsFromPage, 5000);
     setInterval(chatGroupsFromPage, 60000);
     updateChrome();
+  }
+
+  // Whether any of the changes happened inside one of these elements.
+  function touchesControls(records, areas) {
+    var last = null;
+    for (var i = 0; i < records.length; i++) {
+      var target = records[i].target;
+      if (target === last) continue;
+      last = target;
+      for (var node = target; node; node = node.parentNode) {
+        if (areas.indexOf(node) !== -1) return true;
+      }
+    }
+    return false;
   }
 
   function bottomRoomSummary() {
@@ -2307,7 +2461,7 @@
     reportAppearance();
     try {
       if (document.head && typeof NativeObserver === "function") {
-        new NativeObserver(lockViewport).observe(document.head, {
+        new NativeObserver(timedWork("viewport", lockViewport)).observe(document.head, {
           childList: true, subtree: true, attributes: true, attributeFilter: ["content"]
         });
       }
@@ -2328,7 +2482,9 @@
       document.addEventListener("touchstart", pinComposer, { passive: true, capture: true });
       // Opening the sidebar or a sheet changes the edge colours. Re-check a few
       // times while the animation runs; the app cross-fades between reports.
-      var SAMPLE_TIMES = [60, 140, 240, 380, 560];
+      // Three looks, not five, and none in the first 100 ms, while claude.ai
+      // answers the tap (each look lays the page out).
+      var SAMPLE_TIMES = [140, 300, 560];
       document.addEventListener("touchend", function () {
         if (DIAGNOSTICS) measureTap();
         for (var i = 0; i < SAMPLE_TIMES.length; i++) setTimeout(reportAppearance, SAMPLE_TIMES[i]);
@@ -2344,14 +2500,6 @@
       });
       nativeSetTimeout(probeIndexedDB, 3000);
     }
-    // Chat-opening timings need to know when the screen last changed.
-    try {
-      if (document.body && typeof NativeObserver === "function") {
-        new NativeObserver(function () {
-          if (chatOpen) lastMutationAt = performance.now();
-        }).observe(document.body, { childList: true, subtree: true, characterData: true });
-      }
-    } catch (e) {}
   }
 
   // Typing in the message box: when claude.ai shows its send button. Only the

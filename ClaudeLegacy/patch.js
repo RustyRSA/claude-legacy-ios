@@ -11,14 +11,19 @@
   // Set once the old web caches are gone (transpiled code now lives in the app).
   const MIGRATED_KEY = "__appStoreMigrated";
   // The next launch reads ahead what this one asked for before its send button
-  // showed (plus 0.5 s), at least BOOT_MS and at most 10 s. A fixed 2.5 s made a
+  // showed (plus 1 s), at least BOOT_MS and at most 15 s. A fixed 2.5 s made a
   // slow launch (after a claude.ai update: send button at 4.6 s) save a short
   // list, which kept the following launches slow (log 11 Nov: 71 of 963 modules).
+  // The list is saved as soon as that time has passed (round 23): it used to be
+  // saved at 45 s only, so a quick look-up (app left after 13 s, 26 Nov) never
+  // saved its list and the next launch read ahead an old, short one.
   const BOOT_MS = 2500;
+  const LIST_MAX_MS = 15000;
+  // null while the send button may still come.
   const bootCutoff = () => {
     const marks = window.__appLaunchMarks;
-    const seen = marks && marks.sendButton ? marks.sendButton + 500 : 0;
-    return Math.min(10000, Math.max(BOOT_MS, seen));
+    if (marks && marks.sendButton) return Math.min(LIST_MAX_MS, Math.max(BOOT_MS, marks.sendButton + 1000));
+    return performance.now() > 30000 ? BOOT_MS : null; // a page without one (sign-in, settings)
   };
 
   const status = (payload) => {
@@ -176,6 +181,31 @@
     waitingForParse.push(run);
   };
 
+  // The app counts modules (loading screen, "settled" check). One message per
+  // module was ~950 messages through the bridge at every launch: now the first
+  // at once (the app reads claude.ai's build from its name), then one per
+  // 250 ms with the number run since.
+  let modulesUnreported = 0;
+  let lastModuleFile = "";
+  let moduleReportTimer = null;
+  let modulesReported = false;
+  const reportModules = () => {
+    moduleReportTimer = null;
+    if (!modulesUnreported) return;
+    status({ stage: "module", file: lastModuleFile, count: modulesUnreported });
+    modulesUnreported = 0;
+  };
+  const noteModuleRan = (file) => {
+    modulesUnreported += 1;
+    lastModuleFile = file;
+    if (!modulesReported) {
+      modulesReported = true;
+      reportModules();
+    } else if (!moduleReportTimer) {
+      moduleReportTimer = setTimeout(reportModules, 250);
+    }
+  };
+
   const runThroughApp = (code, src) => {
     window.webkit.messageHandlers.patchScript.postMessage({
       code: code,
@@ -239,7 +269,7 @@
           }
         }
         if (ran) {
-          status({ stage: "module", file: shortName(src) });
+          noteModuleRan(shortName(src));
         } else {
           runThroughApp(code, src);
         }
@@ -271,15 +301,31 @@
   // The list lets the next launch read those modules from the cache in parallel,
   // and the last three launches' lists decide what stays in the cache.
   const sessionId = String(Date.now());
+  // The next launch reads ahead only what this one needed in its first
+  // seconds; reading every module it ever used (800, 40 MB) at once slowed
+  // the start down. The rest is read from the app's store when asked for.
+  let manifestSaved = false;
+  const saveManifest = () => {
+    if (manifestSaved || !FAST || typeof LT.usedModules !== "function") return;
+    const cutoff = bootCutoff();
+    if (cutoff === null || performance.now() < cutoff) return;
+    try {
+      const list = LT.usedModules(cutoff).slice(0, 800);
+      if (!list.length) return;
+      localStorage.setItem(MANIFEST_KEY, JSON.stringify(list));
+      manifestSaved = true;
+    } catch (e) {}
+  };
+  const manifestTimer = setInterval(() => {
+    saveManifest();
+    if (manifestSaved || performance.now() > 50000) clearInterval(manifestTimer);
+  }, 1000);
   const saveUsage = (prune) => {
     if (!FAST || typeof LT.usedModules !== "function") return;
     try {
+      saveManifest();
       const used = LT.usedModules();
       if (!used.length) return;
-      // The next launch reads ahead only what this one needed in its first
-      // seconds; reading every module it ever used (800, 40 MB) at once slowed
-      // the start down. The rest is read from the app's store when asked for.
-      if (prune) localStorage.setItem(MANIFEST_KEY, JSON.stringify(LT.usedModules(bootCutoff()).slice(0, 800)));
       let history = [];
       try {
         history = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
@@ -312,10 +358,11 @@
   // ---- Entry scripts ----------------------------------------------------------
   // claude.ai's own entry (index-*.js) and any other module entry served from
   // its asset host, such as the artifact and document viewer (frame-shell-*.js).
+  // Module scripts only: a classic script whose address merely contains
+  // "index" (a third-party script) was taken over too, and run as a module.
   const isEntry = (node) =>
-    node.src &&
-    (node.src.includes("index") ||
-      (node.type === "module" && node.src.indexOf(BASE_URL + "/") === 0));
+    node.src && node.type === "module" &&
+    (node.src.indexOf(BASE_URL + "/") === 0 || /\/index-[\w-]+\.js(\?|$)/.test(node.src));
 
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {

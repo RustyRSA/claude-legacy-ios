@@ -241,8 +241,16 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   const sw = page(HEADER + '<nav><a href="/new">New</a><a href="/artifacts" data-rect="4,154,271,32">Artifacts</a></nav>' + COMPOSER);
   await new Promise((res) => setTimeout(res, 50));
   assert.strictEqual(sw.posted[sw.posted.length - 1].sidebarOpen, false);
-  sw.w.document.elementFromPoint = () => sw.w.document.querySelector('a[href="/artifacts"]');
+  let hitTests = 0;
+  sw.w.document.elementFromPoint = () => { hitTests++; return sw.w.document.querySelector('a[href="/artifacts"]'); };
+  // No touch, no new page: no hit test at the updates (it lays the page out).
   await new Promise((res) => setTimeout(res, 1100));
+  assert.strictEqual(hitTests, 0, "no hit test without a touch");
+  assert.strictEqual(sw.posted[sw.posted.length - 1].sidebarOpen, false);
+  // The edge swipe is a touch: looked for after it.
+  sw.w.document.dispatchEvent(new sw.w.Event("touchstart"));
+  sw.w.document.dispatchEvent(new sw.w.Event("touchend"));
+  await new Promise((res) => setTimeout(res, 500));
   assert.strictEqual(sw.posted[sw.posted.length - 1].sidebarOpen, true, "steps aside for claude.ai's own sidebar");
 
   // At launch claude.ai draws the box, then draws it anew: the new one is hidden
@@ -363,6 +371,24 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   assert.strictEqual(picked, "Sonnet 5.5");
   assert.ok(!md.documentElement.classList.contains("app-menu-quiet"));
   assert.strictEqual(await chat.w.__appChrome.run("menuItems", "nothing"), "[]");
+
+  // While Claude writes, the message list changes many times a second: that no
+  // longer starts a search of the page each time (only the check every second);
+  // a change in claude.ai's message box still does, at once.
+  const wr = page(HEADER + SIDEBAR + '<main></main>' + COMPOSER);
+  await new Promise((res) => setTimeout(res, 50));
+  const runsOf = () => Number((/chrome state (\d+) runs/.exec(wr.w.__appDebugLog()) || [])[1] || 0);
+  const wrd = wr.w.document;
+  const before = runsOf();
+  for (let i = 0; i < 12; i++) {
+    wrd.querySelector("main").appendChild(wrd.createElement("p")).textContent = "word " + i;
+    await new Promise((res) => setTimeout(res, 40));
+  }
+  assert.ok(runsOf() - before <= 1, "message list changes: " + (runsOf() - before) + " updates");
+  wrd.querySelector('[aria-label="Send message"]').setAttribute("aria-label", "Stop response");
+  await new Promise((res) => setTimeout(res, 200));
+  assert.strictEqual(wr.posted[wr.posted.length - 1].streaming, true, "a change in the message box is followed at once");
+  assert.ok(/app's own page work .*chrome watcher \d+ runs/.test(wr.w.__appDebugLog()), "the app's own work is in the log");
 
   // Pages other than new chat and chats keep claude.ai's own controls.
   const r = page(HEADER + COMPOSER, "https://claude.ai/projects");

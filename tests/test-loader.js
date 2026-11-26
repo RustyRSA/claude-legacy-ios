@@ -182,6 +182,21 @@ function run({ fast, caches, manifest, store, migrate, workers = true, workerBre
   assert.deepStrictEqual(store.calls, ["get"], "one request to the app: " + store.calls);
   assert.strictEqual(s5.storeInFlight, 0, "no store requests left open");
 
+  // Without a list from the last launch, modules are read from the store as
+  // they are found: a module's imports, asked for together, share requests
+  // (up to 8 modules each) instead of one request per module.
+  const WIDE = Array.from({ length: 20 }, (_, i) => "w" + i);
+  const wideStore = makeStore();
+  wideStore.files.set(BASE + "/index.js", "'use strict';\n//@deps " + WIDE.map((n) => "./" + n + ".js").join(" ") + "\n" +
+    WIDE.map((n) => "LegacyTranspiler.importModule('./" + n + ".js');").join("") + "log('wide');");
+  WIDE.forEach((n) => wideStore.files.set(BASE + "/" + n + ".js", "'use strict';\nLegacyTranspiler.exportModule('" + BASE + "/" + n + ".js',{});"));
+  const wide = await run({ fast: true, caches: makeCaches(), manifest: [], store: wideStore, migrate: false });
+  assert.deepStrictEqual(wide.order, ["wide"], "wide graph ran");
+  const s7 = wide.LT.stats().stats;
+  assert.strictEqual(s7.storeModules, 21, "every module read from the store: " + s7.storeModules);
+  assert.ok(s7.storeRequests <= 4, "imports read together: " + s7.storeRequests + " requests");
+  assert.strictEqual(s7.misses, 0);
+
   // Empty store, nothing to move: transpiled in workers and saved in the store.
   const fresh = makeStore();
   const cold = await run({ fast: true, caches: makeCaches(), store: fresh, migrate: false });

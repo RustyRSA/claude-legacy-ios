@@ -8499,6 +8499,8 @@ var LegacyTranspiler = (() => {
     storeFiles: 0,
     storeBytes: 0,
     storeInFlight: 0,
+    storeRequests: 0,
+    storeModules: 0,
     retries: 0,
     loadFailures: 0,
     loadError: ""
@@ -8555,11 +8557,26 @@ var LegacyTranspiler = (() => {
   // At most READ_LIMIT reads at a time, in order of priority: reads the page
   // is waiting for (0), then launch batches (1), then head starts (2), each in
   // the order asked. promoteRead moves a read to 0, also one not queued yet.
+  // Single modules from the app's store that wait side by side with the same
+  // priority go in one request, up to GROUP_LIMIT (round 23: 880 one-module
+  // requests at a launch, each a round trip through the app).
+  var GROUP_LIMIT = 8;
   var _promoted = /* @__PURE__ */ new Set();
-  function queuedRead(key, priority, task) {
+  function queuedRead(key, priority, task, storeKey) {
     return new Promise((resolve, reject) => {
-      const item = { key, priority: _promoted.has(key) ? 0 : priority, task, resolve, reject };
+      const item = { key, priority: _promoted.has(key) ? 0 : priority, task, storeKey, resolve, reject };
       insertRead(item);
+      schedulePump();
+    });
+  }
+  // Reads asked for in one go (a module's imports) are all queued before any
+  // is sent, so they can share requests.
+  var _pumpQueued = false;
+  function schedulePump() {
+    if (_pumpQueued) return;
+    _pumpQueued = true;
+    Promise.resolve().then(() => {
+      _pumpQueued = false;
       pumpReads();
     });
   }
@@ -8576,14 +8593,42 @@ var LegacyTranspiler = (() => {
     item.priority = 0;
     insertRead(item);
   }
+  // A read the page is waiting for does not wait for a free place behind head
+  // starts (which carry up to GROUP_LIMIT modules each): up to URGENT_EXTRA more.
+  var URGENT_EXTRA = 2;
   function pumpReads() {
-    while (_readsActive < READ_LIMIT && _readQueue.length) {
+    while (_readQueue.length && _readsActive < READ_LIMIT + (_readQueue[0].priority === 0 ? URGENT_EXTRA : 0)) {
       const item = _readQueue.shift();
       _readsActive += 1;
-      Promise.resolve().then(item.task).then(item.resolve, item.reject).then(() => {
+      let run;
+      if (item.storeKey) {
+        // The queue is in priority order, so its neighbours of the same kind follow it.
+        const group = [item];
+        while (group.length < GROUP_LIMIT && _readQueue.length && _readQueue[0].storeKey &&
+          _readQueue[0].priority === item.priority) {
+          group.push(_readQueue.shift());
+        }
+        run = () => readGroup(group);
+      } else {
+        run = () => Promise.resolve().then(item.task).then(item.resolve, item.reject);
+      }
+      run().then(() => {
         _readsActive -= 1;
         pumpReads();
       });
+    }
+  }
+  // One request for several single modules; each waiting read gets its own code.
+  async function readGroup(group) {
+    const t0 = nowMs();
+    try {
+      const codes = await storeCall("get", { keys: group.map((g) => g.storeKey) });
+      _stats.readMs += nowMs() - t0;
+      _stats.storeRequests += 1;
+      _stats.storeModules += group.length;
+      group.forEach((g, j) => g.resolve(codes && typeof codes[j] === "string" ? codes[j] : null));
+    } catch (e) {
+      group.forEach((g) => g.reject(e));
     }
   }
   // ---- The app's module store ------------------------------------------------
@@ -8631,12 +8676,7 @@ var LegacyTranspiler = (() => {
   }
   async function readFromStore(src, urgent) {
     try {
-      return await queuedRead(src, urgent ? 0 : 2, async () => {
-        const t0 = nowMs();
-        const codes = await storeCall("get", { keys: [src] });
-        _stats.readMs += nowMs() - t0;
-        return codes && typeof codes[0] === "string" ? codes[0] : null;
-      });
+      return await queuedRead(src, urgent ? 0 : 2, null, src);
     } catch (e) {
       _stats.storeError = String(e && e.message || e);
       return null;

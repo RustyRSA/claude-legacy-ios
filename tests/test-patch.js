@@ -31,12 +31,18 @@ function page(runScripts, settings, parsing) {
     loadingStatus: { postMessage: (m) => statuses.push(m) },
     patchScript: { postMessage: (m) => { viaApp.push(m.file); w.eval(m.code); } },
   } };
+  w.__appLaunchMarks = { sendButton: 1 }; // as app-tweaks.js sets it once the send button shows
   w.eval(read("legacy-transpiler.js") + "\n;window.LegacyTranspiler = LegacyTranspiler;");
   w.eval(read("patch.js"));
-  // The page's own nonce'd script, then its entry script.
+  // The page's own nonce'd script, a classic third-party script whose address
+  // has "index" in it (left alone), then its entry script.
   const own = w.document.createElement("script");
   own.setAttribute("nonce", "n0nce");
   w.document.head.appendChild(own);
+  const other = w.document.createElement("script");
+  other.src = "https://widgets.example/v2/index.js";
+  w.document.head.appendChild(other);
+  w.__otherScript = other;
   const entry = w.document.createElement("script");
   entry.type = "module";
   entry.src = BASE + "/frame-shell-T1.js";
@@ -47,10 +53,21 @@ function page(runScripts, settings, parsing) {
 (async () => {
   const inPage = await page("dangerously", { fastLoad: true });
   assert.strictEqual(inPage.entry.type, "javascript/blocked", "entry script blocked");
+  assert.notStrictEqual(inPage.w.__otherScript.type, "javascript/blocked", "a classic script is not taken for the entry");
   assert.strictEqual(inPage.order.join(","), "a,shell:A");
   assert.strictEqual(inPage.viaApp.length, 0, "nothing went through the app");
   assert.ok(inPage.statuses.some((s) => s.stage === "module"), "modules reported");
   assert.strictEqual(inPage.w.__appLoader.inPage(), true);
+  // Modules are reported to the app with a count: the first at once, then summed.
+  await new Promise((r) => setTimeout(r, 400));
+  const reports = inPage.statuses.filter((s) => s.stage === "module");
+  assert.strictEqual(reports[0].file, "frame-shell-T1.js", "first module reported at once by name");
+  assert.strictEqual(reports.reduce((n, s) => n + s.count, 0), 2, "every module counted: " + JSON.stringify(reports));
+  // The read-ahead list for the next launch is saved once the send button has
+  // shown (+1 s, at least 2.5 s), not only at 45 s.
+  await new Promise((r) => setTimeout(r, 2700));
+  const saved = JSON.parse(inPage.w.localStorage.getItem("__appModuleManifest") || "[]");
+  assert.deepStrictEqual(saved.map((u) => u.split("/").pop()), ["frame-shell-T1.js", "a.js"], "list saved: " + saved);
 
   const refused = await page("outside-only", { fastLoad: true });
   assert.strictEqual(refused.order.join(","), "a,shell:A");
