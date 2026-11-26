@@ -65,7 +65,10 @@ Modules run in one of two ways (`patch.js`):
   not in claude.ai's CacheStorage. Page side asks the `moduleStore` reply handler
   (`ModuleStore` in `ViewController.m`: get / put / prune, top frame of claude.ai only).
   Boot reads the last launch's manifest 40 modules per request; all reads go through
-  a queue (6 at a time): waited-for reads, then launch batches, then head starts.
+  a queue (6 at a time, 2 more for waited-for reads): waited-for reads, then launch
+  batches, then head starts; single modules side by side share requests (8 each,
+  round 23). The manifest is what the launch asked for until its send button + 1 s,
+  saved at that moment (round 23; was at 45 s).
   First launch moves modules over from the old web cache; housekeeping at 45 s then
   deletes every `transpiled*` web cache (`localStorage.__appStoreMigrated`).
   Without the handler (iOS 13) the web cache is used as before.
@@ -76,6 +79,9 @@ Modules run in one of two ways (`patch.js`):
 |---|---|
 | `ClaudeLegacy/ChatListViewController.m` | Native chat list and its store (round 13c) |
 | `ClaudeLegacy/ViewController.m` | Native shell: web view, edge colour strips, menu, bridge handlers, crash recovery, session cookies, sign-in links, mic permission, debug log |
+| `ClaudeLegacy/NativeChrome.m` | Native top bar and message bar (`NativeChrome`, rounds 12–21; own file since round 23) |
+| `ClaudeLegacy/ModuleStore.m` | The `moduleStore` reply handler: transpiled modules as files (round 7; own file since round 23) |
+| `ClaudeLegacy/AppShared.h` | `AppBackgroundColor`, `IsTrustedFrame`, `kChromeTopHeightKey`, shared by the three files above |
 | `ClaudeLegacy/app-tweaks.js` | Page-side app behaviour and diagnostics (see header comment) |
 | `ClaudeLegacy/patch.js` | Entry interception, module running, launch manifest |
 | `ClaudeLegacy/legacy-transpiler.js` | Transpiler bundle + our loader (edit the "Module loading" block; the rest is upstream) |
@@ -479,6 +485,73 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   read-ahead batches (cache reads 59 s summed). Full review / speed work proposed as its
   own session.
 
+### Round 23 (26 Nov 2026) — review, launch and tap speed, clean-up (branch `claude/review-speed-pass`)
+- Full review of the app's own code (ViewController.m, ChatListViewController.m,
+  app-tweaks.js, patch.js, the loader block and the two "App change" fixes).
+- What the 26 Nov log (send button 5.3 s, main thread blocked 0.4–6.3 s without a
+  break, claude.ai's module code 3.6 s) says: the launch was CPU-bound, not waiting
+  for reads, and the phone was most likely slowed down: the app's own start-up
+  scripts (unchanged) took 44 ms vs 17 ms on 22 Nov, HTML parsing 0.5 s vs 0.2 s.
+  The app now logs Low Power Mode and heat ("app started", each "launch:" event,
+  log header, and when it changes).
+- Read-ahead list bug: saved only at 45 s. A quick look-up (the 19:03 launch went to
+  the background after 13 s) never saved its list, so the next launch read ahead an
+  old one (73 modules from batches). Now saved as soon as send button + 1 s has
+  passed (at least 2.5 s, at most 15 s; pages without a send button at 45 s).
+- Grouped store reads: single modules waiting side by side with the same priority
+  go in one `moduleStore` request (up to 8), and a module's imports are queued
+  together before any is sent (microtask). 26 Nov: ~880 one-module requests. Reads
+  the page waits for may use 2 places beyond the limit of 6. Log: "cache reads …
+  ms summed (N requests for M single modules)".
+- Module messages to the app: one per 250 ms with a count (was one per module,
+  ~950 per launch); the first at once (build name).
+- The app's own page work is now measured (it was not: its observers bypass the
+  Diagnostics wrapper) — log line "app's own page work (ms in the first 15 s / in
+  all)": chrome watcher, chrome state, chrome early box, edge colours, composer pin,
+  viewport, sidebar sections. Cuts:
+  - Launch: the stand-in text field check (which lays the page out) ran after every
+    DOM change while claude.ai builds its page; now once per frame (rAF, still
+    before drawing).
+  - In use: DOM changes outside claude.ai's message box and top bar (the message
+    list while Claude writes) no longer start a whole-page search 8 times a second;
+    the 1 s check follows them. Not filtered in sidebar mode or voice/dictation.
+  - The sidebar hit test (lays the page out) runs only for 3 s after a touch, a new
+    page or a size change, not at every update.
+  - Dictation-button search only when the text box is gone (was every DOM change).
+  - Chat-open timing observer connected only while a chat opens (it saw every text
+    change of every page). Composer pin skipped while the native bar is in use
+    (it laid the page out at every tap). Edge colour samples after a tap: 3, from
+    140 ms (were 5, from 60 ms). 1 s update and 2 s colour check skipped while hidden.
+  - Native button actions search claude.ai's controls only when they need them
+    (send searched twice, every action once).
+- Bugs fixed: patch.js took any classic script with "index" in its address for
+  claude.ai's entry (blocked, run as a module): now module scripts only; a failed
+  typed send left `sending` on for good (stray / late dictated text never moved to
+  the native bar again); "Copy debug log" built the page log twice; dead mic-button
+  line in `applyState:`.
+- Chat list: names in plain text skip the per-character font check, others are
+  checked once (cache).
+- Structure: `NativeChrome` and `ModuleStore` moved out of ViewController.m (3,250 →
+  2,317 lines) into their own files, added to project.pbxproj by hand (ids
+  `C1A71157000000000000C001`–`C007`). app-tweaks.js not split (one closure with
+  shared helpers; splitting would not help yet).
+- Checked, left as is (measured or small): voice-patch scans (3 indexOf per module,
+  22 MB in 22 ms in Node); the 330 KB worker source string at every page load; the
+  entry-script observer staying connected; `checkReady`'s innerText (only in gaps of
+  0.8 s); the 8 s cover limit (after a claude.ai update the send button can come
+  later: 9.9 s on 26 Nov 18:49, so claude.ai's controls may show for ~2 s).
+- claude.ai graph 26 Nov (`index-TEgdicZr.js`): 5,585 modules OK; the entry's static
+  imports are 59 modules, 18.8 MB, only 3 levels deep — the other ~890 modules of a
+  launch come through dynamic imports.
+- Native read-only chat viewer (proposal, Logan to decide): claude.ai already fetches
+  each chat's messages as JSON; app-tweaks.js could hand those (no request of the
+  app's own) to the app, which keeps the text of recent chats and shows a picked
+  chat natively at once, while claude.ai loads behind it ("Continue in Claude").
+  That is the one way past claude.ai's own ~2–4 s start for look-ups. Cost: chat
+  text stored on the phone (file protection, not backed up, a switch to turn it off
+  and wipe), only chats this phone has opened, claude.ai's JSON shape may change
+  (viewer then not offered), rich content (artifacts, files, tools) shown plainly.
+
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
   App Store + Mobbin screenshots). Use Apple's own iOS 16 controls (UIKit, SF Symbols, New York
@@ -762,7 +835,7 @@ and icons, the official app's widgets/Siri/Shortcuts.
 
 ## Open items
 
-Updated 22 Nov 2026 (round 21). Solved items were removed; see the rounds above.
+Updated 26 Nov 2026 (round 23). Solved items were removed; see the rounds above.
 
 | Item | Status |
 |---|---|
@@ -775,7 +848,9 @@ Updated 22 Nov 2026 (round 21). Solved items were removed; see the rounds above.
 | Re-login verification opens in Safari | 06 copied-link flow, `claudelegacy://` + Safari bookmarklet; optional Snap tweak redirect later |
 | Voice stops when locked / app switched | WebKit mutes capture in the background. Background audio mode is set; no fix found |
 | Artifact / Doc links "browser not supported" | 06 covers the shell only. Next: inject the compatibility layer into `*.frame.claudeusercontent.com` frames (user scripts with `forMainFrameOnly:NO`, host-guarded; evaluate with `evaluateJavaScript:inFrame:` or in-frame nonce; separate, narrower bridge for those frames) |
-| Launch time | Send button ~2.0 s from the store, ~4–9 s on the first launch after a claude.ai update (all modules transpiled again). claude.ai's own code runs ~1.7–2.6 s on the main thread: the floor for this design |
+| Launch time | Send button ~2.0 s from the store, ~4–9 s on the first launch after a claude.ai update (all modules transpiled again). claude.ai's own code runs ~1.7–3.6 s on the main thread: the floor for this design. Round 23 (not yet on the phone): read-ahead list saved at send button + 1 s, grouped store reads, the app's own page work measured and cut; check the next log's "app's own page work" and "requests for … single modules" lines and the power state |
+| Native read-only chat viewer | Proposed in round 23 (instant look-ups from claude.ai's own chat JSON, stored on the phone). Logan to decide: it stores chat text on the phone |
+| Cover limit 8 s | After a claude.ai update the send button can come after 8 s (9.9 s on 26 Nov): claude.ai's controls then show until it does. Could follow the last launch's time |
 | Landscape | claude.ai may dock its sidebar on a wide page; the app then steps aside (its own UI shows). Not designed for |
 
 ## Sign-in bookmarklet (Safari)

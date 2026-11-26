@@ -14,12 +14,40 @@ static const NSTimeInterval kChatListKeep = 14 * 24 * 3600.0;
 /// Titles of the sections the user has closed in the native list.
 static NSString *const kCollapsedSectionsKey = @"ChatListCollapsedSections";
 
+static NSString *CheckedReadableText(NSString *text);
+
 /// The text without the symbols this iOS has no picture for (newer emoji show
 /// as a question-mark box); the text itself when nothing readable is left.
+/// Plain text (nothing from U+2000 on: letters of every script below that,
+/// punctuation, digits) is shown as it is, and each name is checked once: the
+/// list looked up a font for every character of every name each time it opened
+/// (round 23).
 static NSString *ReadableText(NSString *text) {
     if (text.length == 0) {
         return text;
     }
+    BOOL plain = YES;
+    for (NSUInteger i = 0; i < text.length && plain; i++) {
+        plain = [text characterAtIndex:i] < 0x2000;
+    }
+    if (plain) {
+        return text;
+    }
+    static NSCache<NSString *, NSString *> *checked;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        checked = [[NSCache alloc] init];
+        checked.countLimit = 1000;
+    });
+    NSString *known = [checked objectForKey:text];
+    if (known == nil) {
+        known = CheckedReadableText(text);
+        [checked setObject:known forKey:text];
+    }
+    return known;
+}
+
+static NSString *CheckedReadableText(NSString *text) {
     CTFontRef base = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, 17, NULL);
     if (base == NULL) {
         return text;
