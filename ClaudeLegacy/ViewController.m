@@ -1221,6 +1221,7 @@ static const CGFloat kMessageBarHeight = 80;
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"appEvent"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"chrome"];
     [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"chatList"];
+    [self.webView.configuration.userContentController addScriptMessageHandler:self name:@"keepAwake"];
     [self installNativeChrome];
     // Again now that the native bars exist: they take the same colours.
     [self applyEdgeReport:[[NSUserDefaults standardUserDefaults] objectForKey:kEdgeColoursKey] animated:NO];
@@ -2949,7 +2950,19 @@ static const CGFloat kMessageBarHeight = 80;
     }
 }
 
+/// iOS's auto-lock off while voice mode or dictation runs (the page says when),
+/// back on when it ends, a new page loads or the page process stops.
+- (void)setKeepAwake:(BOOL)awake {
+    UIApplication *app = UIApplication.sharedApplication;
+    if (app.idleTimerDisabled == awake) {
+        return;
+    }
+    app.idleTimerDisabled = awake;
+    [self logEvent:awake ? @"auto-lock paused (voice or dictation connected)" : @"auto-lock back on"];
+}
+
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
+    [self setKeepAwake:NO];
     self.chromeReady = NO; // a new page: its controls are not found yet
     if (@available(iOS 15.0, *)) {
         [(NativeChrome *)self.nativeChrome coverPage]; // only when the bars are up
@@ -2984,6 +2997,7 @@ static const CGFloat kMessageBarHeight = 80;
 /// in the background. The page is reloaded where it was (the same chat) instead
 /// of leaving a blank view; only repeated stops in a short time show the error.
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    [self setKeepAwake:NO];
     NSDate *now = [NSDate date];
     [self.terminations addObject:now];
     NSIndexSet *old = [self.terminations indexesOfObjectsPassingTest:^BOOL(NSDate *date, NSUInteger idx, BOOL *stop) {
@@ -3100,6 +3114,12 @@ static const CGFloat kMessageBarHeight = 80;
 
     if ([message.name isEqualToString:@"chrome"]) {
         [self handleChromeState:message.body];
+        return;
+    }
+
+    if ([message.name isEqualToString:@"keepAwake"]) {
+        // Voice mode or dictation is connected: no auto-lock until it ends.
+        [self setKeepAwake:[message.body isKindOfClass:NSNumber.class] && [message.body boolValue]];
         return;
     }
 

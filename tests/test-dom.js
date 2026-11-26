@@ -18,7 +18,9 @@ const w = dom.window;
 const $ = (id) => w.document.getElementById(id);
 const posted = [];
 w.__appSettings = { diagnostics: true }; // the measurements checked below
-w.webkit = { messageHandlers: { appearance: { postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) } } };
+const awake = [];
+w.webkit = { messageHandlers: { appearance: { postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) },
+  keepAwake: { postMessage: (m) => awake.push(m) } } };
 let overlayShown = false;
 w.document.elementsFromPoint = (x, y) => (y < 10
   ? (overlayShown ? [$("overlay"), $("top"), w.document.body, w.document.documentElement] : [$("top"), w.document.body, w.document.documentElement])
@@ -29,7 +31,7 @@ class StrictSocket extends w.EventTarget {
   constructor(url, protocols) {
     super();
     if (!/^wss?:\/\//.test(String(url))) throw new w.DOMException("The string did not match the expected pattern.", "SyntaxError");
-    this.url = String(url); this.protocols = protocols; StrictSocket.made.push(this);
+    this.url = String(url); this.protocols = protocols; this.readyState = 0; StrictSocket.made.push(this);
   }
   fire(type, props) { const e = new w.Event(type); Object.assign(e, props || {}); this.dispatchEvent(e); }
 }
@@ -51,6 +53,14 @@ assert.ok(ws.url.startsWith("wss://claude.ai/api/ws/voice/"));
 const dict = new w.WebSocket("wss://claude.ai/api/ws/speech_to_text/voice_stream?a=b", ["p", "ticket.SECRET"]);
 assert.strictEqual(dict.url, "wss://claude.ai/api/ws/speech_to_text/voice_stream?a=b");
 assert.throws(() => new w.WebSocket("ftp://claude.ai/api/ws/voice/x"));
+
+// While a voice or dictation connection is open the app keeps the phone awake.
+ws.readyState = 1; ws.fire("open");
+assert.deepStrictEqual(awake, [true], "awake while connected");
+ws.readyState = 3; ws.fire("close", { code: 1000 });
+assert.deepStrictEqual(awake, [true], "still awake: dictation socket not closed yet");
+dict.readyState = 3; dict.fire("close", { code: 1000 });
+assert.deepStrictEqual(awake, [true, false], "auto-lock back once all are closed");
 
 // MutationObserver still works through the timing wrapper, and its cost is counted
 // (created after start-up, so it counts as claude.ai's).

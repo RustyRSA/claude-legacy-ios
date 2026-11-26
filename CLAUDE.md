@@ -469,6 +469,15 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   `new Qt({sampleRate:e.inputSampleRate,channels:e.inputChannels,…`. Both match once in
   `ccc68ce7f-rlplIK8G.js`; the old `PCM_DEFAULT` stays for older builds. Test:
   `tests/test-voice-patches2.js` (claude.ai's own excerpt, run before and after).
+  Installed 26 Nov (`8ddb6a0`); Logan: voice still not working (no log of an attempt yet;
+  the pulled log's page load never loaded the voice module: "voice PCM mode: not seen yet").
+- Auto-lock: while a voice / dictation socket is open the page posts `keepAwake` true
+  (false when the last closes); the app sets `idleTimerDisabled` (reset on page load and
+  page process stop; logged as app events). Like other voice apps.
+- Same log: launch slower (send button 5.3 s): claude.ai's module code now runs 3.6 s on
+  the main thread (1.7 s on 22 Nov; one module 212 ms), and only 73 modules came from
+  read-ahead batches (cache reads 59 s summed). Full review / speed work proposed as its
+  own session.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,

@@ -290,6 +290,19 @@
     }
   }
 
+  // While voice mode or dictation has a connection open the phone must not lock
+  // itself (auto-lock would end the call), as in other voice apps: the app is told
+  // and switches iOS's idle timer off until the last such connection closes.
+  var awakeSent = false;
+  function reportAwake() {
+    var live = openSockets.some(function (ws) { return ws.readyState <= 1; });
+    if (live === awakeSent) return;
+    awakeSent = live;
+    try {
+      window.webkit.messageHandlers.keepAwake.postMessage(live);
+    } catch (e) {}
+  }
+
   if (typeof window.WebSocket === "function" && typeof Proxy === "function") {
     var socketCount = 0;
     window.WebSocket = new Proxy(window.WebSocket, {
@@ -317,6 +330,7 @@
             ws.__appKind = (VOICE_SOCKET.exec(original) || [])[1] || "";
             ["open", "close"].forEach(function (type) {
               ws.addEventListener(type, function () {
+                reportAwake();
                 if (typeof updateChrome === "function" && NATIVE_CHROME) setTimeout(updateChrome, 0);
               });
             });
