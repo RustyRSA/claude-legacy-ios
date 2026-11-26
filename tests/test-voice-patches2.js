@@ -24,6 +24,22 @@ const session = 'class S{constructor(){this.unsentVoiceSettings={};this.voice="b
 const prelude = 'var Cn={inputEncoding:"opus",inputSampleRate:16e3,inputChannels:1};function Jo(v){return v}function Jt(){return null}' +
   'class Qt{constructor(c){this.config=Object.assign({usePcm:!1},c)}}';
 
+// As in the app: claude.ai's code is transpiled first, then patched (the transpiler
+// prints `voice: this.voice`, with spaces, so patterns written for the raw code miss).
+const tctx = vm.createContext({ console: { log() {}, warn() {}, error() {} } });
+vm.runInContext(fs.readFileSync(repo + "/ClaudeLegacy/legacy-transpiler.js", "utf8") + "\n;globalThis.LT = LegacyTranspiler;", tctx);
+tctx.LT.init({ BASE_URL: "https://x/v1", minify: true, target: { platform: "iOS", version: "16.3" }, runScript() {} });
+const transpiled = tctx.LT.transpile("https://x/v1/ccc-test.js", session + "export{S};");
+const patchedT = page.__appPatchModule(transpiled, "ccc-test.js");
+assert.notStrictEqual(patchedT, transpiled, "transpiled code patched");
+assert.ok(/inputEncoding: "linear16"/.test(patchedT) && /usePcm: !0/.test(patchedT), "both patches in the transpiled code");
+if (process.argv[3] && fs.existsSync(process.argv[3])) {
+  // optional: claude.ai's real module, transpiled (node tests/test-voice-patches2.js . path/to/ccc-transpiled.js)
+  const real = fs.readFileSync(process.argv[3], "utf8");
+  const realPatched = page.__appPatchModule(real, "real.js");
+  assert.ok(/inputEncoding: "linear16"/.test(realPatched) && /usePcm: !0/.test(realPatched), "real module patched");
+  console.log("real module patched");
+}
 const patched = page.__appPatchModule(session, "ccc-test.js");
 assert.notStrictEqual(patched, session, "patched");
 assert.strictEqual(page.__appPatchModule(patched, "ccc-test.js"), patched, "patching twice changes nothing");

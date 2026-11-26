@@ -192,11 +192,13 @@
   // the call settings sent to the server ask for 16 kHz linear16 ...
   //   ...Jo(this.unsentVoiceSettings),voice:this.voice,clientAec:B,outputFormat:…
   //   ...Jo(this.unsentVoiceSettings),voice:this.voice,clientAec:B,inputEncoding:"linear16",inputSampleRate:16e3,outputFormat:…
-  var VOICE_ENCODING = /(\.\.\.[\w$]+\(this\.unsentVoiceSettings\),voice:this\.voice,clientAec:[\w$]+,)(?!inputEncoding)/;
+  // The code arrives here transpiled, with spaces after ":" (e.g. `voice: this.voice`):
+  // the patterns allow any spacing (26 Nov: written for the raw code, they never matched).
+  var VOICE_ENCODING = /(\.\.\.[\w$]+\(this\.unsentVoiceSettings\)\s*,\s*voice\s*:\s*this\.voice\s*,\s*clientAec\s*:\s*[\w$]+\s*,)(?!\s*inputEncoding)/;
   // ... and the voice recorder records PCM:
   //   new Qt({sampleRate:e.inputSampleRate,channels:e.inputChannels,preferredBackend:…
   //   new Qt({sampleRate:e.inputSampleRate,channels:e.inputChannels,usePcm:!0,preferredBackend:…
-  var VOICE_RECORDER = /(new [\w$]+\(\{sampleRate:[\w$]+\.inputSampleRate,channels:[\w$]+\.inputChannels,)(preferredBackend:)/;
+  var VOICE_RECORDER = /(new\s+[\w$]+\(\s*\{\s*sampleRate\s*:\s*[\w$]+\.inputSampleRate\s*,\s*channels\s*:\s*[\w$]+\.inputChannels\s*,)(\s*preferredBackend\s*:)/;
 
   window.__appPatchModule = function (code, file) {
     if (!appStarted) launch.firstModule = performance.now();
@@ -214,8 +216,8 @@
         record("app", "voice: PCM recording mode enabled in " + file);
       }
       if (code.indexOf("unsentVoiceSettings") !== -1 && VOICE_ENCODING.test(code) && VOICE_RECORDER.test(code)) {
-        code = code.replace(VOICE_ENCODING, '$1inputEncoding:"linear16",inputSampleRate:16e3,')
-          .replace(VOICE_RECORDER, "$1usePcm:!0,$2");
+        code = code.replace(VOICE_ENCODING, '$1inputEncoding: "linear16",inputSampleRate: 16e3,')
+          .replace(VOICE_RECORDER, "$1usePcm: !0,$2");
         patchStatus.pcmMode = "enabled, settings and recorder (" + file + ")";
         record("app", "voice: PCM recording (settings and recorder) enabled in " + file);
       }

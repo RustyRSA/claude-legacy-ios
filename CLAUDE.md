@@ -478,6 +478,14 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   the main thread (1.7 s on 22 Nov; one module 212 ms), and only 73 modules came from
   read-ahead batches (cache reads 59 s summed). Full review / speed work proposed as its
   own session.
+- 22b (log 26 Nov 19:45, voice tried): socket still `input_encoding=opus`, then
+  "[VoiceSession] Failed to start"; "voice PCM mode: not seen yet". The round 22 patterns
+  were written against claude.ai's raw code, but `__appPatchModule` gets the transpiled
+  code, where astring prints `voice: this.voice` / `sampleRate: e.inputSampleRate` (space
+  after ":"), so they never matched. Patterns now allow any spacing;
+  `tests/test-voice-patches2.js` transpiles the excerpt first, and with a second argument
+  checks a real transpiled module (`build/research/ccc-transpiled.js`, local). Lesson:
+  test page-side patches on transpiled output.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
