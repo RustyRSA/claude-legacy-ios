@@ -13,6 +13,8 @@
 		CEADC8242F5E8F26000F74EA /* SceneDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = CEADC8232F5E8F26000F74EA /* SceneDelegate.m */; };
 		CEADC8272F5E8F26000F74EA /* ViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = CEADC8262F5E8F26000F74EA /* ViewController.m */; };
 		C1A7115700000000000000B1 /* ChatListViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = C1A7115700000000000000B2 /* ChatListViewController.m */; };
+		C1A71157000000000000C001 /* NativeChrome.m in Sources */ = {isa = PBXBuildFile; fileRef = C1A71157000000000000C002 /* NativeChrome.m */; };
+		C1A71157000000000000C004 /* ModuleStore.m in Sources */ = {isa = PBXBuildFile; fileRef = C1A71157000000000000C005 /* ModuleStore.m */; };
 		CEADC82A2F5E8F26000F74EA /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = CEADC8282F5E8F26000F74EA /* LaunchScreen.storyboard */; };
 		CEADC82D2F5E8F26000F74EA /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = CEADC82B2F5E8F26000F74EA /* Main.storyboard */; };
 		CEADC8312F5E8F29000F74EA /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = CEADC8302F5E8F29000F74EA /* main.m */; };
@@ -70,6 +72,11 @@
 		CEADC8262F5E8F26000F74EA /* ViewController.m */ = {isa = PBXFileReference; indentWidth = 4; lastKnownFileType = sourcecode.c.objc; path = ViewController.m; sourceTree = "<group>"; tabWidth = 4; };
 		C1A7115700000000000000B2 /* ChatListViewController.m */ = {isa = PBXFileReference; indentWidth = 4; lastKnownFileType = sourcecode.c.objc; path = ChatListViewController.m; sourceTree = "<group>"; tabWidth = 4; };
 		C1A7115700000000000000B3 /* ChatListViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ChatListViewController.h; sourceTree = "<group>"; };
+		C1A71157000000000000C002 /* NativeChrome.m */ = {isa = PBXFileReference; indentWidth = 4; lastKnownFileType = sourcecode.c.objc; path = NativeChrome.m; sourceTree = "<group>"; tabWidth = 4; };
+		C1A71157000000000000C003 /* NativeChrome.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = NativeChrome.h; sourceTree = "<group>"; };
+		C1A71157000000000000C005 /* ModuleStore.m */ = {isa = PBXFileReference; indentWidth = 4; lastKnownFileType = sourcecode.c.objc; path = ModuleStore.m; sourceTree = "<group>"; tabWidth = 4; };
+		C1A71157000000000000C006 /* ModuleStore.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ModuleStore.h; sourceTree = "<group>"; };
+		C1A71157000000000000C007 /* AppShared.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppShared.h; sourceTree = "<group>"; };
 		CEADC8292F5E8F26000F74EA /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		CEADC82C2F5E8F26000F74EA /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		CEADC82E2F5E8F29000F74EA /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -149,6 +156,11 @@
 				CEADC8262F5E8F26000F74EA /* ViewController.m */,
 				C1A7115700000000000000B3 /* ChatListViewController.h */,
 				C1A7115700000000000000B2 /* ChatListViewController.m */,
+				C1A71157000000000000C003 /* NativeChrome.h */,
+				C1A71157000000000000C002 /* NativeChrome.m */,
+				C1A71157000000000000C006 /* ModuleStore.h */,
+				C1A71157000000000000C005 /* ModuleStore.m */,
+				C1A71157000000000000C007 /* AppShared.h */,
 				E934A9713055443800056BAB /* legacy-transpiler.js */,
 				CEADC8282F5E8F26000F74EA /* LaunchScreen.storyboard */,
 				CEADC82B2F5E8F26000F74EA /* Main.storyboard */,
@@ -317,6 +329,8 @@
 			files = (
 				CEADC8272F5E8F26000F74EA /* ViewController.m in Sources */,
 				C1A7115700000000000000B1 /* ChatListViewController.m in Sources */,
+				C1A71157000000000000C001 /* NativeChrome.m in Sources */,
+				C1A71157000000000000C004 /* ModuleStore.m in Sources */,
 				E9AA10032FD0000000000003 /* LoadingOverlayView.m in Sources */,
 				CE123A5C2F5EDE2D008A1A3A /* PolyfillsLoader.m in Sources */,
 				CEADC8192F5E8F26000F74EA /* AppDelegate.m in Sources */,

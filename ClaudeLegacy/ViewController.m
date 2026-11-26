@@ -11,20 +11,13 @@
 #import "PolyfillsLoader.h"
 #import "LoadingOverlayView.h"
 #import "ChatListViewController.h"
+#import "NativeChrome.h"
+#import "ModuleStore.h"
+#import "AppShared.h"
 
 #import <WebKit/WebKit.h>
 #import <SafariServices/SafariServices.h>
 #import <AVFoundation/AVFoundation.h>
-
-/// Background behind the web page, matching claude.ai's own theme colours
-/// (#FCFCFB light, #151515 dark) so no off-colour band shows while it loads.
-static UIColor *AppBackgroundColor(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
-        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
-        ? [UIColor colorWithRed:0x15/255.0 green:0x15/255.0 blue:0x15/255.0 alpha:1.0]
-        : [UIColor colorWithRed:0xFC/255.0 green:0xFC/255.0 blue:0xFB/255.0 alpha:1.0];
-    }];
-}
 
 /// Number of modules the previous successful launch had to transpile — used to
 /// turn the module counter into a real percentage on every launch but the first.
@@ -62,9 +55,6 @@ static NSString *const kDiagnosticsKey = @"Diagnostics";
 /// The native controls were in use when the app last ran: they are then shown
 /// from the first moment of the next launch instead of when the page is ready.
 static NSString *const kChromeWasReadyKey = @"NativeControlsWereReady";
-/// Height of the native top bar below the status bar (points): what it takes to
-/// cover claude.ai's own top bar, as last reported by the page.
-static NSString *const kChromeTopHeightKey = @"NativeTopBarHeight";
 
 /// Events worth keeping across reloads and launches (sign-outs, the page process
 /// being stopped by iOS, session cookie changes, launch times). Shown at the top
@@ -98,981 +88,24 @@ static NSString *ShortFingerprint(NSString *value) {
     return [NSString stringWithFormat:@"#%02x%02x%02x", digest[0], digest[1], digest[2]];
 }
 
-/// Messages are accepted only from claude.ai's own top-level page, see
-/// -isTrustedMessage:.
-static BOOL IsTrustedFrame(WKFrameInfo *frame) {
-    WKSecurityOrigin *origin = frame.securityOrigin;
-    return frame.isMainFrame
-        && [origin.protocol isEqualToString:@"https"]
-        && [origin.host.lowercaseString isEqualToString:@"claude.ai"]
-        && origin.port == 0;
+static NSString *ThermalStateName(NSProcessInfoThermalState state) {
+    switch (state) {
+        case NSProcessInfoThermalStateNominal: return @"normal";
+        case NSProcessInfoThermalStateFair: return @"warm";
+        case NSProcessInfoThermalStateSerious: return @"hot";
+        case NSProcessInfoThermalStateCritical: return @"critical";
+    }
+    return @"unknown";
 }
 
-#pragma mark - Module store
-
-/// Transpiled claude.ai modules, kept as files in the app's Caches folder
-/// instead of claude.ai's web storage (CacheStorage), whose quota they filled and
-/// which took seconds to open at every launch. The page asks through the
-/// "moduleStore" handler and gets an answer back (iOS 14 and later):
-///   {op: "get", dir, keys: [address, ...]} -> [code or null, ...]
-///   {op: "put", dir, key: address, code}   -> true
-///   {op: "prune", dir, keep: [address, ...]} -> {removed, files, bytes}
-/// dir names the transpiler version (one folder each; prune removes the
-/// others). A file is named by the SHA-256 of its https address, so no
-/// address can name a path. Only claude.ai's top-level page is answered.
-API_AVAILABLE(ios(14.0))
-@interface ModuleStore : NSObject <WKScriptMessageHandlerWithReply>
-@end
-
-@implementation ModuleStore {
-    dispatch_queue_t _queue;
+/// Low Power Mode and heat slow the processor down, and that shows in every
+/// launch time: on 26 Nov 2026 the app's own start-up scripts, unchanged, took
+/// 2.6 times as long as on 22 Nov, and claude.ai's code twice as long.
+static NSString *PowerSummary(void) {
+    NSProcessInfo *info = NSProcessInfo.processInfo;
+    return [NSString stringWithFormat:@"low power mode %@, phone %@",
+            info.lowPowerModeEnabled ? @"on" : @"off", ThermalStateName(info.thermalState)];
 }
-
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        // Reads run side by side; writes and pruning run alone.
-        _queue = dispatch_queue_create("ClaudeLegacy.moduleStore", DISPATCH_QUEUE_CONCURRENT);
-    }
-    return self;
-}
-
-+ (NSURL *)rootURL {
-    NSURL *caches = [[NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory
-                                                          inDomains:NSUserDomainMask] firstObject];
-    return [caches URLByAppendingPathComponent:@"transpiled-modules" isDirectory:YES];
-}
-
-/// The folder for one transpiler version, or nil for a name that is not plain.
-+ (NSURL *)folderNamed:(id)name {
-    if (![name isKindOfClass:NSString.class]) {
-        return nil;
-    }
-    NSString *text = name;
-    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
-                               @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"];
-    if (text.length == 0 || text.length > 64 || [text hasPrefix:@"."]
-        || [text rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) {
-        return nil;
-    }
-    return [[self rootURL] URLByAppendingPathComponent:text isDirectory:YES];
-}
-
-/// The file name for a module address, or nil if it is not an https address.
-+ (NSString *)fileNameForKey:(id)key {
-    if (![key isKindOfClass:NSString.class]) {
-        return nil;
-    }
-    NSString *text = key;
-    if (![text hasPrefix:@"https://"] || text.length > 2048) {
-        return nil;
-    }
-    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
-    NSMutableString *fileName = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2 + 3];
-    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
-        [fileName appendFormat:@"%02x", digest[i]];
-    }
-    [fileName appendString:@".js"];
-    return fileName;
-}
-
-- (void)userContentController:(WKUserContentController *)userContentController
-      didReceiveScriptMessage:(WKScriptMessage *)message
-                 replyHandler:(void (^)(id _Nullable reply, NSString * _Nullable errorMessage))replyHandler
-{
-    if (!IsTrustedFrame(message.frameInfo) || ![message.body isKindOfClass:NSDictionary.class]) {
-        replyHandler(nil, @"refused");
-        return;
-    }
-    NSDictionary *body = message.body;
-    NSString *op = [body[@"op"] isKindOfClass:NSString.class] ? body[@"op"] : @"";
-    NSURL *folder = [ModuleStore folderNamed:body[@"dir"]];
-    if (folder == nil) {
-        replyHandler(nil, @"bad folder name");
-        return;
-    }
-    void (^reply)(id, NSString *) = ^(id value, NSString *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            replyHandler(value, error);
-        });
-    };
-
-    if ([op isEqualToString:@"get"]) {
-        NSArray *keys = [body[@"keys"] isKindOfClass:NSArray.class] ? body[@"keys"] : @[];
-        dispatch_async(_queue, ^{
-            NSMutableArray *codes = [NSMutableArray arrayWithCapacity:keys.count];
-            for (id key in keys) {
-                NSString *fileName = [ModuleStore fileNameForKey:key];
-                NSString *code = nil;
-                if (fileName) {
-                    code = [NSString stringWithContentsOfURL:[folder URLByAppendingPathComponent:fileName]
-                                                    encoding:NSUTF8StringEncoding
-                                                       error:nil];
-                }
-                [codes addObject:code ? (id)code : (id)[NSNull null]];
-            }
-            reply(codes, nil);
-        });
-        return;
-    }
-
-    if ([op isEqualToString:@"put"]) {
-        NSString *fileName = [ModuleStore fileNameForKey:body[@"key"]];
-        id code = body[@"code"];
-        if (fileName == nil || ![code isKindOfClass:NSString.class]) {
-            replyHandler(nil, @"bad module");
-            return;
-        }
-        dispatch_barrier_async(_queue, ^{
-            NSError *error = nil;
-            [NSFileManager.defaultManager createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:nil];
-            BOOL ok = [(NSString *)code writeToURL:[folder URLByAppendingPathComponent:fileName]
-                                        atomically:YES
-                                          encoding:NSUTF8StringEncoding
-                                             error:&error];
-            reply(@(ok), ok ? nil : (error.localizedDescription ?: @"write failed"));
-        });
-        return;
-    }
-
-    if ([op isEqualToString:@"prune"]) {
-        NSArray *keep = [body[@"keep"] isKindOfClass:NSArray.class] ? body[@"keep"] : @[];
-        if (keep.count == 0) {
-            replyHandler(nil, @"empty keep list");
-            return;
-        }
-        dispatch_barrier_async(_queue, ^{
-            NSFileManager *files = NSFileManager.defaultManager;
-            NSMutableSet *keepNames = [NSMutableSet setWithCapacity:keep.count];
-            for (id key in keep) {
-                NSString *fileName = [ModuleStore fileNameForKey:key];
-                if (fileName) {
-                    [keepNames addObject:fileName];
-                }
-            }
-            // Folders of other transpiler versions go entirely.
-            NSArray<NSURL *> *folders = [files contentsOfDirectoryAtURL:[ModuleStore rootURL]
-                                             includingPropertiesForKeys:nil
-                                                                options:0
-                                                                  error:nil];
-            for (NSURL *other in folders) {
-                if (![other.lastPathComponent isEqualToString:folder.lastPathComponent]) {
-                    [files removeItemAtURL:other error:nil];
-                }
-            }
-            NSInteger removed = 0;
-            NSInteger count = 0;
-            long long bytes = 0;
-            NSArray<NSURL *> *entries = [files contentsOfDirectoryAtURL:folder
-                                             includingPropertiesForKeys:@[NSURLFileSizeKey]
-                                                                options:0
-                                                                  error:nil];
-            for (NSURL *entry in entries) {
-                if (![keepNames containsObject:entry.lastPathComponent]) {
-                    if ([files removeItemAtURL:entry error:nil]) {
-                        removed += 1;
-                    }
-                    continue;
-                }
-                id size = nil;
-                [entry getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-                count += 1;
-                if ([size isKindOfClass:NSNumber.class]) {
-                    bytes += [(NSNumber *)size longLongValue];
-                }
-            }
-            reply(@{@"removed": @(removed), @"files": @(count), @"bytes": @(bytes)}, nil);
-        });
-        return;
-    }
-
-    replyHandler(nil, @"unknown operation");
-}
-
-@end
-
-#pragma mark - Native controls
-
-static UIImage *SymbolImage(NSString *name, CGFloat pointSize, UIImageSymbolWeight weight) {
-    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:pointSize
-                                                                                         weight:weight];
-    return [UIImage systemImageNamed:name withConfiguration:config];
-}
-
-/// Standard iOS controls drawn over the page, as in any chat app: a bar at the
-/// top (chat list button, the chat's title, new chat and "..." buttons) and a
-/// message bar at the bottom (+, model, a text field that grows, dictation and
-/// one send / stop / voice button). System colours, tint and SF Symbols only.
-/// Both bars are solid and take the page's own edge colours, so they cover
-/// claude.ai's header and message box. Each button asks the page to press
-/// claude.ai's own control (onAction); the page reports which controls it found
-/// and claude.ai's state (applyState:). Touches between the bars go through to
-/// the page.
-API_AVAILABLE(ios(15.0))
-@interface NativeChrome : UIView <UITextViewDelegate>
-@property (nonatomic, copy) void (^onAction)(NSString *name, NSString *argument);
-- (void)applyState:(NSDictionary *)state;
-/// After a send: clears the box when it worked and gives the keyboard back.
-- (void)finishSend:(BOOL)sent;
-/// The app's message box has the keyboard.
-@property (nonatomic, readonly) BOOL editing;
-/// At launch, when the controls were in use last time: shown at once, with the
-/// buttons off until the page reports.
-- (void)showWhileLoading;
-/// Covers the page between the bars (plain background and a spinner) until the
-/// page reports that the app's controls are in use: while claude.ai loads it
-/// draws its own message box several times over, in different places, and
-/// hiding each of those in time proved unreliable (rounds 16–19). At most 8 s.
-- (void)coverPage;
-/// The model button's native menu: asks for claude.ai's menu items
-/// ({index, title, subtitle, checked, disabled, sub}; none = show claude.ai's
-/// own menu, nil = it is already showing), and reports the item picked.
-@property (nonatomic, copy) void (^onMenuItems)(NSString *menu, void (^completion)(NSArray<NSDictionary *> * _Nullable items));
-@property (nonatomic, copy) void (^onMenuPick)(NSString *menu, NSDictionary *item);
-/// How much of the screen's bottom the message bar takes (points above the safe
-/// area's bottom edge; 0 when it is not shown): the page ends there.
-@property (nonatomic, copy) void (^onBarInset)(CGFloat inset);
-/// Height of the message bar now, with a text of several lines.
-@property (nonatomic, readonly) CGFloat barHeight;
-/// The message bar (it rides on the keyboard): the page ends at its top.
-@property (nonatomic, readonly) UIView *messageBar;
-/// The page's edge colours, and whether the page is dark (the controls then use
-/// the dark system colours whatever the phone is set to).
-- (void)setTopColor:(UIColor *)top bottomColor:(UIColor *)bottom dark:(BOOL)dark;
-@end
-
-@implementation NativeChrome {
-    UIView *_topBar;
-    UIView *_bottomBar;
-    UILabel *_titleLabel;
-    UIButton *_listButton;
-    UIButton *_incognitoButton;
-    UIButton *_newChatButton;
-    UIButton *_moreButton;
-    UIView *_field;
-    UITextView *_textView;
-    UILabel *_placeholder;
-    NSLayoutConstraint *_textHeight;
-    UIButton *_plusButton;
-    UIButton *_modelButton;
-    UIButton *_micButton;
-    UIButton *_actionButton;
-    UIButton *_attachButton;
-    NSString *_actionName;
-    NSLayoutConstraint *_topBarBottom;
-    NSArray<UIButton *> *_buttons;
-    BOOL _composerShown;
-    CGFloat _reportedInset;
-    UIView *_curtain;
-    UIActivityIndicatorView *_spinner;
-    NSUInteger _coverToken;
-    BOOL _shown;
-    BOOL _waiting;
-    NSUInteger _waitToken;
-    BOOL _streaming;
-    BOOL _voice;
-    BOOL _dictating;
-    BOOL _refocusAfterSend;
-}
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        self.translatesAutoresizingMaskIntoConstraints = NO;
-        self.hidden = YES;
-        self.alpha = 0;
-        [self buildControls];
-    }
-    return self;
-}
-
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    return hit == self ? nil : hit;
-}
-
-- (UIButton *)barButton:(NSString *)symbol action:(SEL)action label:(NSString *)label {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-    [button setImage:SymbolImage(symbol, 19, UIImageSymbolWeightRegular) forState:UIControlStateNormal];
-    button.accessibilityLabel = label;
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    [NSLayoutConstraint activateConstraints:@[
-        [button.widthAnchor constraintEqualToConstant:44],
-        [button.heightAnchor constraintEqualToConstant:44],
-    ]];
-    return button;
-}
-
-/// A solid bar with a hairline along the edge that faces the page.
-- (UIView *)barWithLineAtTop:(BOOL)lineAtTop {
-    UIView *bar = [[UIView alloc] init];
-    bar.translatesAutoresizingMaskIntoConstraints = NO;
-    bar.backgroundColor = AppBackgroundColor();
-    UIView *line = [[UIView alloc] init];
-    line.translatesAutoresizingMaskIntoConstraints = NO;
-    line.backgroundColor = UIColor.separatorColor;
-    [bar addSubview:line];
-    [NSLayoutConstraint activateConstraints:@[
-        [line.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor],
-        [line.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor],
-        [line.heightAnchor constraintEqualToConstant:1.0 / MAX(UIScreen.mainScreen.scale, 1.0)],
-        lineAtTop ? [line.topAnchor constraintEqualToAnchor:bar.topAnchor]
-                  : [line.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor],
-    ]];
-    [self addSubview:bar];
-    return bar;
-}
-
-- (void)buildControls {
-    UILayoutGuide *safe = self.safeAreaLayoutGuide;
-
-    // The top bar.
-    _topBar = [self barWithLineAtTop:NO];
-    _listButton = [self barButton:@"sidebar.left" action:@selector(menuTapped) label:@"Chats"];
-    _incognitoButton = [self barButton:@"eye.slash" action:@selector(incognitoTapped) label:@"Incognito chat"];
-    _newChatButton = [self barButton:@"square.and.pencil" action:@selector(newChatTapped) label:@"New chat"];
-    _moreButton = [self barButton:@"ellipsis.circle" action:@selector(moreTapped) label:@"Chat options"];
-
-    UIStackView *rightButtons = [[UIStackView alloc] initWithArrangedSubviews:@[_incognitoButton, _newChatButton, _moreButton]];
-    rightButtons.translatesAutoresizingMaskIntoConstraints = NO;
-    rightButtons.axis = UILayoutConstraintAxisHorizontal;
-
-    _titleLabel = [[UILabel alloc] init];
-    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    _titleLabel.textColor = UIColor.labelColor;
-    _titleLabel.textAlignment = NSTextAlignmentCenter;
-    _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    _titleLabel.text = @"New chat";
-    [_titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
-
-    for (UIView *view in @[_listButton, rightButtons, _titleLabel]) {
-        [_topBar addSubview:view];
-    }
-    CGFloat savedHeight = [NSUserDefaults.standardUserDefaults doubleForKey:kChromeTopHeightKey];
-    _topBarBottom = [_topBar.bottomAnchor constraintEqualToAnchor:safe.topAnchor
-                                                         constant:MIN(MAX(savedHeight, 44), 72)];
-    [NSLayoutConstraint activateConstraints:@[
-        [_topBar.topAnchor constraintEqualToAnchor:self.topAnchor],
-        [_topBar.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
-        [_topBar.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
-        _topBarBottom,
-        [_listButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:4],
-        [_listButton.bottomAnchor constraintEqualToAnchor:_topBar.bottomAnchor],
-        [rightButtons.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-4],
-        [rightButtons.bottomAnchor constraintEqualToAnchor:_topBar.bottomAnchor],
-        [_titleLabel.centerXAnchor constraintEqualToAnchor:_topBar.centerXAnchor],
-        [_titleLabel.centerYAnchor constraintEqualToAnchor:_listButton.centerYAnchor],
-        [_titleLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:_listButton.trailingAnchor constant:4],
-        [_titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:rightButtons.leadingAnchor constant:-4],
-    ]];
-
-    // The message bar.
-    _bottomBar = [self barWithLineAtTop:YES];
-
-    UIButtonConfiguration *modelConfig = [UIButtonConfiguration plainButtonConfiguration];
-    modelConfig.contentInsets = NSDirectionalEdgeInsetsMake(0, 8, 0, 8);
-    modelConfig.image = SymbolImage(@"chevron.down", 10, UIImageSymbolWeightSemibold);
-    modelConfig.imagePlacement = NSDirectionalRectEdgeTrailing;
-    modelConfig.imagePadding = 4;
-    modelConfig.baseForegroundColor = UIColor.secondaryLabelColor;
-    _modelButton = [UIButton buttonWithConfiguration:modelConfig primaryAction:nil];
-    _modelButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _modelButton.accessibilityLabel = @"Model";
-    [_modelButton addTarget:self action:@selector(modelTapped) forControlEvents:UIControlEventTouchUpInside];
-    // A native menu, filled from claude.ai's model menu each time it opens.
-    __weak typeof(self) weakSelf = self;
-    UIDeferredMenuElement *models = [UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
-        typeof(self) strongSelf = weakSelf;
-        if (strongSelf == nil) {
-            completion(@[]);
-            return;
-        }
-        [strongSelf menuElementsFor:@"model" completion:completion];
-    }];
-    _modelButton.menu = [UIMenu menuWithChildren:@[models]];
-    _modelButton.showsMenuAsPrimaryAction = YES;
-    [self setModel:@"" effort:@""];
-
-    _plusButton = [self barButton:@"plus" action:@selector(plusTapped) label:@"Add files"];
-    // The + menu is native too, filled from claude.ai's + menu each time it opens
-    // (files and photos, connectors, research, web search, …).
-    UIDeferredMenuElement *extras = [UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
-        typeof(self) strongSelf = weakSelf;
-        if (strongSelf == nil) {
-            completion(@[]);
-            return;
-        }
-        [strongSelf menuElementsFor:@"plus" completion:completion];
-    }];
-    _plusButton.menu = [UIMenu menuWithChildren:@[extras]];
-    _plusButton.showsMenuAsPrimaryAction = YES;
-
-    _field = [[UIView alloc] init];
-    _field.translatesAutoresizingMaskIntoConstraints = NO;
-    _field.backgroundColor = UIColor.tertiarySystemFillColor;
-    _field.layer.cornerRadius = 18;
-
-    _textView = [[UITextView alloc] init];
-    _textView.translatesAutoresizingMaskIntoConstraints = NO;
-    _textView.font = [UIFont systemFontOfSize:17];
-    _textView.textColor = UIColor.labelColor;
-    _textView.backgroundColor = UIColor.clearColor;
-    _textView.textContainerInset = UIEdgeInsetsMake(8, 0, 8, 0);
-    _textView.scrollEnabled = NO;
-    _textView.delegate = self;
-
-    _placeholder = [[UILabel alloc] init];
-    _placeholder.translatesAutoresizingMaskIntoConstraints = NO;
-    _placeholder.font = [UIFont systemFontOfSize:17];
-    _placeholder.textColor = UIColor.placeholderTextColor;
-    _placeholder.text = @"Message";
-    _placeholder.userInteractionEnabled = NO;
-
-    _micButton = [self barButton:@"mic" action:@selector(micTapped) label:@"Dictate"];
-    _micButton.tintColor = UIColor.secondaryLabelColor;
-
-    _actionButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _actionButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _actionButton.layer.cornerRadius = 16;
-    [_actionButton addTarget:self action:@selector(actionTapped) forControlEvents:UIControlEventTouchUpInside];
-
-    for (UIView *view in @[_textView, _placeholder, _micButton]) {
-        [_field addSubview:view];
-    }
-    // Files attached in claude.ai's (hidden) box: a paperclip with their number at
-    // the right of the model row; its menu lists them, each can be removed.
-    UIButtonConfiguration *attachConfig = [UIButtonConfiguration plainButtonConfiguration];
-    attachConfig.image = SymbolImage(@"paperclip", 13, UIImageSymbolWeightSemibold);
-    attachConfig.imagePadding = 4;
-    attachConfig.contentInsets = NSDirectionalEdgeInsetsMake(0, 8, 0, 8);
-    attachConfig.baseForegroundColor = UIColor.secondaryLabelColor;
-    _attachButton = [UIButton buttonWithConfiguration:attachConfig primaryAction:nil];
-    _attachButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _attachButton.showsMenuAsPrimaryAction = YES;
-    _attachButton.hidden = YES;
-
-    for (UIView *view in @[_modelButton, _plusButton, _field, _actionButton, _attachButton]) {
-        [_bottomBar addSubview:view];
-    }
-
-    _textHeight = [_textView.heightAnchor constraintEqualToConstant:36];
-    [NSLayoutConstraint activateConstraints:@[
-        [_bottomBar.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
-        [_bottomBar.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
-        [_bottomBar.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
-        [_bottomBar.topAnchor constraintEqualToAnchor:_modelButton.topAnchor constant:-4],
-
-        [_modelButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:8],
-        [_modelButton.heightAnchor constraintEqualToConstant:30],
-        [_modelButton.trailingAnchor constraintLessThanOrEqualToAnchor:_attachButton.leadingAnchor constant:-4],
-        [_attachButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-8],
-        [_attachButton.centerYAnchor constraintEqualToAnchor:_modelButton.centerYAnchor],
-        [_attachButton.heightAnchor constraintEqualToConstant:30],
-        [_modelButton.bottomAnchor constraintEqualToAnchor:_field.topAnchor constant:-2],
-
-        [_plusButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:4],
-        [_plusButton.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor constant:4],
-
-        [_field.leadingAnchor constraintEqualToAnchor:_plusButton.trailingAnchor constant:2],
-        [_field.trailingAnchor constraintEqualToAnchor:_actionButton.leadingAnchor constant:-8],
-        [_field.bottomAnchor constraintEqualToAnchor:self.keyboardLayoutGuide.topAnchor constant:-8],
-
-        [_textView.topAnchor constraintEqualToAnchor:_field.topAnchor],
-        [_textView.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor],
-        [_textView.leadingAnchor constraintEqualToAnchor:_field.leadingAnchor constant:8],
-        [_textView.trailingAnchor constraintEqualToAnchor:_micButton.leadingAnchor],
-        _textHeight,
-        [_placeholder.leadingAnchor constraintEqualToAnchor:_textView.leadingAnchor constant:5],
-        [_placeholder.centerYAnchor constraintEqualToAnchor:_textView.topAnchor constant:18],
-        [_micButton.trailingAnchor constraintEqualToAnchor:_field.trailingAnchor],
-        [_micButton.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor constant:4],
-
-        [_actionButton.widthAnchor constraintEqualToConstant:32],
-        [_actionButton.heightAnchor constraintEqualToConstant:32],
-        [_actionButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
-        [_actionButton.bottomAnchor constraintEqualToAnchor:_field.bottomAnchor constant:-2],
-    ]];
-    // The cover for the page while it loads, under the bars.
-    _curtain = [[UIView alloc] init];
-    _curtain.translatesAutoresizingMaskIntoConstraints = NO;
-    _curtain.backgroundColor = AppBackgroundColor();
-    _curtain.hidden = YES;
-    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    _spinner.translatesAutoresizingMaskIntoConstraints = NO;
-    [_curtain addSubview:_spinner];
-    [self insertSubview:_curtain atIndex:0];
-    [NSLayoutConstraint activateConstraints:@[
-        [_curtain.topAnchor constraintEqualToAnchor:_topBar.bottomAnchor],
-        [_curtain.bottomAnchor constraintEqualToAnchor:_bottomBar.topAnchor],
-        [_curtain.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
-        [_curtain.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
-        [_spinner.centerXAnchor constraintEqualToAnchor:_curtain.centerXAnchor],
-        [_spinner.centerYAnchor constraintEqualToAnchor:_curtain.centerYAnchor],
-        [_placeholder.trailingAnchor constraintLessThanOrEqualToAnchor:_micButton.leadingAnchor],
-    ]];
-
-    // Not the chat list button: the list works while the page still loads.
-    _buttons = @[_incognitoButton, _newChatButton, _moreButton, _modelButton, _plusButton, _micButton, _actionButton];
-    [self updateActionButton];
-}
-
-/// An SF Symbol for a + menu entry, by its words (nil: no picture).
-+ (UIImage *)symbolForMenuTitle:(NSString *)title {
-    NSString *t = title.lowercaseString;
-    NSArray<NSArray<NSString *> *> *pairs = @[
-        @[@"photo", @"photo.on.rectangle"], @[@"file", @"paperclip"], @[@"screenshot", @"camera.viewfinder"],
-        @[@"camera", @"camera"], @[@"project", @"folder"], @[@"web search", @"globe"], @[@"research", @"magnifyingglass"],
-        @[@"connector", @"puzzlepiece.extension"], @[@"skill", @"wand.and.stars"], @[@"style", @"paintbrush"],
-        @[@"github", @"chevron.left.forwardslash.chevron.right"], @[@"drive", @"externaldrive"], @[@"think", @"brain"],
-    ];
-    for (NSArray<NSString *> *pair in pairs) {
-        if ([t rangeOfString:pair[0]].location != NSNotFound) {
-            return [UIImage systemImageNamed:pair[1]];
-        }
-    }
-    return nil;
-}
-
-/// claude.ai's menu items as native menu entries. Without items, one entry
-/// that shows claude.ai's own menu.
-- (void)menuElementsFor:(NSString *)menu completion:(void (^)(NSArray<UIMenuElement *> *))completion {
-    if (self.onMenuItems == nil) {
-        completion(@[]);
-        return;
-    }
-    __weak typeof(self) weakSelf = self;
-    self.onMenuItems(menu, ^(NSArray<NSDictionary *> *items) {
-        if (items == nil) {
-            completion(@[]); // claude.ai's own menu is on screen
-            return;
-        }
-        NSMutableArray<UIMenuElement *> *elements = [NSMutableArray array];
-        // Items of one section (claude.ai's own group, or "Effort") follow each
-        // other; each run becomes a titled part of the menu.
-        NSMutableArray<UIMenuElement *> *run = [NSMutableArray array];
-        __block NSString *runTitle = @"";
-        void (^closeRun)(void) = ^{
-            if (run.count) {
-                // The current choices and the effort levels sit in the menu itself;
-                // any other group of claude.ai's ("More models") is a submenu.
-                BOOL inlineRun = runTitle.length == 0 || [runTitle isEqualToString:@"Effort"];
-                [elements addObject:[UIMenu menuWithTitle:runTitle
-                                                    image:nil
-                                                identifier:nil
-                                                   options:inlineRun ? UIMenuOptionsDisplayInline : 0
-                                                  children:[run copy]]];
-                [run removeAllObjects];
-            }
-        };
-        for (NSDictionary *item in items) {
-            NSString *title = [item[@"title"] isKindOfClass:NSString.class] ? item[@"title"] : @"";
-            if (title.length == 0) {
-                continue;
-            }
-            NSString *group = [item[@"group"] isKindOfClass:NSString.class] ? item[@"group"] : @"";
-            if (![group isEqualToString:runTitle]) {
-                closeRun();
-                runTitle = group;
-            }
-            UIAction *action = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__kindof UIAction *chosen) {
-                if (weakSelf.onMenuPick) {
-                    weakSelf.onMenuPick(menu, item);
-                }
-            }];
-            NSString *subtitle = [item[@"subtitle"] isKindOfClass:NSString.class] ? item[@"subtitle"] : @"";
-            if (subtitle.length) {
-                action.subtitle = subtitle;
-            }
-            if ([item[@"sub"] boolValue]) {
-                action.image = [UIImage systemImageNamed:@"chevron.right"];
-            } else {
-                action.image = [NativeChrome symbolForMenuTitle:title];
-            }
-            action.state = [item[@"checked"] boolValue] ? UIMenuElementStateOn : UIMenuElementStateOff;
-            if ([item[@"disabled"] boolValue]) {
-                action.attributes = UIMenuElementAttributesDisabled;
-            }
-            [run addObject:action];
-        }
-        closeRun();
-        if (elements.count == 0) {
-            [elements addObject:[UIAction actionWithTitle:@"Show Claude's menu" image:nil identifier:nil handler:^(__kindof UIAction *chosen) {
-                [weakSelf fire:menu argument:nil];
-            }]];
-        }
-        completion(elements);
-    });
-}
-
-/// The message bar with one line of text: 4 + model row 30 + 2 + text 36 + 8.
-static const CGFloat kMessageBarHeight = 80;
-
-- (UIView *)messageBar {
-    return _bottomBar;
-}
-
-- (CGFloat)barHeight {
-    return kMessageBarHeight + MAX(_textHeight.constant - 36, 0);
-}
-
-/// Tells the app where the page has to end (see onBarInset).
-- (void)reportInset {
-    CGFloat inset = (_shown && !_composerShown) ? kMessageBarHeight : 0;
-    if (inset == _reportedInset) {
-        return;
-    }
-    _reportedInset = inset;
-    if (self.onBarInset) {
-        self.onBarInset(inset);
-    }
-}
-
-/// The bars stay up while the page is not ready (loading, or rebuilding itself),
-/// with the buttons off; if the page has not come back after 15 s they go.
-- (void)beginWaiting {
-    if (_waiting) {
-        return;
-    }
-    _waiting = YES;
-    for (UIButton *button in _buttons) {
-        button.enabled = NO;
-    }
-    NSUInteger token = ++_waitToken;
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        typeof(self) strongSelf = weakSelf;
-        if (strongSelf && strongSelf->_waiting && strongSelf->_waitToken == token) {
-            strongSelf->_waiting = NO;
-            [strongSelf uncoverPage];
-            [strongSelf setShown:NO];
-        }
-    });
-}
-
-- (void)endWaiting {
-    if (!_waiting) {
-        return;
-    }
-    _waiting = NO;
-    _waitToken += 1;
-    for (UIButton *button in _buttons) {
-        button.enabled = YES;
-    }
-}
-
-- (void)showWhileLoading {
-    _shown = YES;
-    self.hidden = NO;
-    self.alpha = 1;
-    [self beginWaiting];
-    [self reportInset];
-    [self coverPage];
-}
-
-- (void)coverPage {
-    if (!_shown || _composerShown) {
-        return;
-    }
-    [_curtain.layer removeAllAnimations];
-    _curtain.alpha = 1;
-    _curtain.hidden = NO;
-    [_spinner startAnimating];
-    NSUInteger token = ++_coverToken;
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        typeof(self) strongSelf = weakSelf;
-        if (strongSelf && strongSelf->_coverToken == token) {
-            [strongSelf uncoverPage];
-        }
-    });
-}
-
-- (void)uncoverPage {
-    if (_curtain.hidden) {
-        return;
-    }
-    NSUInteger token = ++_coverToken;
-    // A moment for the page to draw with claude.ai's controls already hidden.
-    [UIView animateWithDuration:0.2 delay:0.3 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
-        self->_curtain.alpha = 0;
-    } completion:^(BOOL finished) {
-        if (self->_coverToken == token) {
-            self->_curtain.hidden = YES;
-            [self->_spinner stopAnimating];
-        }
-    }];
-}
-
-- (void)setShown:(BOOL)show {
-    if (show == _shown) {
-        return;
-    }
-    _shown = show;
-    [self reportInset];
-    if (!show && _textView.isFirstResponder) {
-        [_textView resignFirstResponder];
-    }
-    if (show) {
-        self.hidden = NO;
-    }
-    [UIView animateWithDuration:0.2 animations:^{
-        self.alpha = show ? 1 : 0;
-    } completion:^(BOOL finished) {
-        if (!self->_shown) {
-            self.hidden = YES;
-        }
-    }];
-}
-
-/// The top bar reaches as far down as claude.ai's own (CSS px, converted with
-/// the page's layout width); the tallest seen is kept so the bar does not jump
-/// between pages.
-- (void)coverTopHeight:(CGFloat)cssHeight viewWidth:(CGFloat)cssWidth {
-    if (cssHeight <= 0 || cssWidth <= 0 || self.bounds.size.width <= 0) {
-        return;
-    }
-    CGFloat points = ceil(cssHeight * self.bounds.size.width / cssWidth);
-    points = MIN(MAX(points, 44), 72);
-    if (points > _topBarBottom.constant) {
-        _topBarBottom.constant = points;
-        [NSUserDefaults.standardUserDefaults setDouble:points forKey:kChromeTopHeightKey];
-    }
-}
-
-- (void)setTopColor:(UIColor *)top bottomColor:(UIColor *)bottom dark:(BOOL)dark {
-    _topBar.backgroundColor = top;
-    _bottomBar.backgroundColor = bottom;
-    _curtain.backgroundColor = top;
-    self.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
-}
-
-- (void)setModel:(NSString *)model effort:(NSString *)effort {
-    UIFont *font = [UIFont systemFontOfSize:15];
-    NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:model.length ? model : @"Model"
-        attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.secondaryLabelColor}];
-    if (effort.length) {
-        [title appendAttributedString:[[NSAttributedString alloc] initWithString:[@" " stringByAppendingString:effort]
-            attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.tertiaryLabelColor}]];
-    }
-    UIButtonConfiguration *config = _modelButton.configuration;
-    config.attributedTitle = title;
-    _modelButton.configuration = config;
-}
-
-- (NSString *)trimmedText {
-    return [_textView.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-}
-
-/// One button at the right of the message bar: stop while Claude answers, send
-/// when there is text, voice mode otherwise.
-- (void)updateActionButton {
-    BOOL hasText = [self trimmedText].length > 0;
-    UIImage *image;
-    UIColor *background;
-    UIColor *tint;
-    NSString *label;
-    if (_dictating) {
-        _actionName = @"dictateFinish";
-        image = SymbolImage(@"checkmark", 15, UIImageSymbolWeightBold);
-        background = self.tintColor;
-        tint = UIColor.whiteColor;
-        label = @"Finish dictation";
-    } else if (_streaming && !hasText) {
-        // Stop while Claude answers; typed text can still be sent (claude.ai
-        // takes it as the next message).
-        _actionName = @"stop";
-        image = SymbolImage(@"stop.fill", 13, UIImageSymbolWeightRegular);
-        background = UIColor.labelColor;
-        tint = UIColor.systemBackgroundColor;
-        label = @"Stop";
-    } else if (hasText || !_voice) {
-        _actionName = @"send";
-        image = SymbolImage(@"arrow.up", 15, UIImageSymbolWeightBold);
-        // The bar's own tint: UIColor.tintColor would follow this button's tint,
-        // which is the white of its arrow (a blank white circle, 13 Nov).
-        background = hasText ? self.tintColor : UIColor.tertiarySystemFillColor;
-        tint = hasText ? UIColor.whiteColor : UIColor.tertiaryLabelColor;
-        label = @"Send";
-    } else {
-        _actionName = @"voice";
-        image = SymbolImage(@"waveform", 19, UIImageSymbolWeightRegular);
-        background = UIColor.clearColor;
-        tint = self.tintColor;
-        label = @"Voice mode";
-    }
-    [_actionButton setImage:image forState:UIControlStateNormal];
-    _actionButton.backgroundColor = background;
-    _actionButton.tintColor = tint;
-    _actionButton.accessibilityLabel = label;
-    _micButton.hidden = _streaming && !hasText;
-}
-
-- (void)textViewDidChange:(UITextView *)textView {
-    _placeholder.hidden = textView.text.length > 0;
-    CGFloat width = textView.bounds.size.width > 0 ? textView.bounds.size.width : 260;
-    CGFloat needed = [textView sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)].height;
-    _textHeight.constant = MIN(MAX(needed, 36), 140);
-    textView.scrollEnabled = needed > 140;
-    [self updateActionButton];
-}
-
-- (void)applyState:(NSDictionary *)state {
-    BOOL ready = [state[@"ready"] boolValue];
-    BOOL sidebarOpen = [state[@"sidebarOpen"] boolValue];
-    NSString *page = [state[@"page"] isKindOfClass:NSString.class] ? state[@"page"] : @"";
-    BOOL inChat = [page isEqualToString:@"chat"];
-    // Not ready on a chat page means loading or a moment of rebuilding: the bars
-    // stay. Any other page (settings, sign-in) has no use for them.
-    if (!ready && _shown && ![page isEqualToString:@"other"]) {
-        [self beginWaiting];
-        return;
-    }
-    [self endWaiting];
-    [self uncoverPage]; // in use, or a page the bars are not for
-    if (ready) {
-        [self coverTopHeight:[state[@"topHeight"] doubleValue] viewWidth:[state[@"viewWidth"] doubleValue]];
-    }
-    _streaming = [state[@"streaming"] boolValue];
-    _voice = [state[@"voice"] boolValue];
-
-    NSString *title = [state[@"title"] isKindOfClass:NSString.class] ? state[@"title"] : @"";
-    _titleLabel.text = title.length ? title : (inChat ? @"Chat" : @"New chat");
-    _incognitoButton.hidden = inChat || ![state[@"incognito"] boolValue];
-    _newChatButton.hidden = !inChat;
-    _moreButton.hidden = !inChat;
-    _moreButton.enabled = [state[@"more"] boolValue];
-    _micButton.enabled = [state[@"dictate"] boolValue];
-    // While claude.ai dictates: the mic becomes cancel (red x), the action
-    // button becomes finish (tick), the field says it is listening.
-    BOOL dictating = [state[@"dictating"] boolValue];
-    _dictating = dictating;
-    _micButton.enabled = dictating || [state[@"dictate"] boolValue];
-    [_micButton setImage:SymbolImage(dictating ? @"xmark" : @"mic", 19, UIImageSymbolWeightRegular) forState:UIControlStateNormal];
-    _micButton.tintColor = dictating ? UIColor.systemRedColor : UIColor.secondaryLabelColor;
-    _micButton.accessibilityLabel = dictating ? @"Cancel dictation" : @"Dictate";
-    NSString *heard = [state[@"dictationText"] isKindOfClass:NSString.class] ? state[@"dictationText"] : @"";
-    _placeholder.text = dictating ? (heard.length ? heard : @"Listening…") : @"Message";
-    _placeholder.lineBreakMode = dictating ? NSLineBreakByTruncatingHead : NSLineBreakByTruncatingTail;
-    NSString *model = [state[@"model"] isKindOfClass:NSString.class] ? state[@"model"] : @"";
-    NSString *effort = [state[@"effort"] isKindOfClass:NSString.class] ? state[@"effort"] : @"";
-    [self setModel:model effort:effort];
-    [self setAttachments:[state[@"attachments"] isKindOfClass:NSArray.class] ? state[@"attachments"] : @[]];
-    [self updateActionButton];
-
-    // Words dictated in claude.ai's box arrive here, to be sent from this bar.
-    NSString *dictated = [state[@"dictated"] isKindOfClass:NSString.class] ? state[@"dictated"] : @"";
-    if (dictated.length) {
-        NSString *current = _textView.text ?: @"";
-        BOOL needsSpace = current.length > 0 && ![current hasSuffix:@" "] && ![current hasSuffix:@"\n"];
-        _textView.text = [NSString stringWithFormat:@"%@%@%@", current, needsSpace ? @" " : @"", dictated];
-        [self textViewDidChange:_textView];
-    }
-
-    // Voice mode and dictation run in claude.ai's own message box: the app's
-    // message bar steps aside for it, the top bar stays.
-    BOOL composerShown = ready && [state[@"composerShown"] boolValue];
-    if (composerShown != _composerShown) {
-        _composerShown = composerShown;
-        _bottomBar.hidden = composerShown;
-        if (composerShown && _textView.isFirstResponder) {
-            [_textView resignFirstResponder];
-        }
-        [self reportInset];
-    }
-
-    [self setShown:ready && !sidebarOpen];
-}
-
-- (BOOL)editing {
-    return _textView.isFirstResponder;
-}
-
-- (void)finishSend:(BOOL)sent {
-    if (sent) {
-        _textView.text = @"";
-        [self textViewDidChange:_textView];
-    }
-    if (_refocusAfterSend) {
-        [_textView becomeFirstResponder];
-    }
-    _refocusAfterSend = NO;
-}
-
-- (void)setAttachments:(NSArray *)names {
-    NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
-    __weak typeof(self) weakSelf = self;
-    [names enumerateObjectsUsingBlock:^(id name, NSUInteger index, BOOL *stop) {
-        if (![name isKindOfClass:NSString.class]) {
-            return;
-        }
-        UIAction *remove = [UIAction actionWithTitle:[@"Remove " stringByAppendingString:name]
-                                               image:[UIImage systemImageNamed:@"xmark.circle"]
-                                          identifier:nil
-                                             handler:^(__kindof UIAction *action) {
-            [weakSelf fire:@"removeAttachment" argument:[NSString stringWithFormat:@"%lu", (unsigned long)index]];
-        }];
-        remove.attributes = UIMenuElementAttributesDestructive;
-        [items addObject:remove];
-    }];
-    _attachButton.hidden = items.count == 0;
-    if (items.count == 0) {
-        return;
-    }
-    UIButtonConfiguration *config = _attachButton.configuration;
-    config.title = [NSString stringWithFormat:@"%lu", (unsigned long)items.count];
-    _attachButton.configuration = config;
-    _attachButton.accessibilityLabel = [NSString stringWithFormat:@"%lu attached", (unsigned long)items.count];
-    _attachButton.menu = [UIMenu menuWithTitle:items.count == 1 ? @"1 file attached" : [NSString stringWithFormat:@"%lu files attached", (unsigned long)items.count]
-                                      children:items];
-}
-
-- (void)fire:(NSString *)name argument:(NSString *)argument {
-    if (self.onAction) {
-        self.onAction(name, argument);
-    }
-}
-
-- (void)menuTapped {
-    [_textView resignFirstResponder];
-    [self fire:@"sidebar" argument:nil];
-}
-- (void)incognitoTapped { [self fire:@"incognito" argument:nil]; }
-- (void)newChatTapped { [self fire:@"newChat" argument:nil]; }
-- (void)moreTapped {
-    [_textView resignFirstResponder];
-    [self fire:@"more" argument:nil];
-}
-- (void)plusTapped {
-    [_textView resignFirstResponder];
-    [self fire:@"plus" argument:nil];
-}
-- (void)modelTapped {
-    [_textView resignFirstResponder];
-    [self fire:@"model" argument:nil];
-}
-- (void)micTapped { [self fire:_dictating ? @"dictateCancel" : @"dictate" argument:nil]; }
-- (void)actionTapped {
-    if ([_actionName isEqualToString:@"send"]) {
-        NSString *text = [self trimmedText];
-        if (text.length == 0) {
-            return;
-        }
-        _refocusAfterSend = _textView.isFirstResponder;
-        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
-        [self fire:@"send" argument:text];
-    } else if ([_actionName isEqualToString:@"dictateFinish"]) {
-        [self fire:_actionName argument:nil]; // the keyboard stays: the words come to this bar
-    } else {
-        [_textView resignFirstResponder];
-        [self fire:_actionName argument:nil];
-    }
-}
-
-@end
 
 @interface ViewController () <WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate, UIGestureRecognizerDelegate, WKHTTPCookieStoreObserver>
 
@@ -1125,6 +158,8 @@ static const CGFloat kMessageBarHeight = 80;
 /// The page's bottom at the top of the native message bar (active while the bar
 /// is shown): the page ends right above the bar, also when the keyboard is up.
 @property (nonatomic, strong, nullable) NSLayoutConstraint *webBottomToBar;
+/// Low Power Mode and heat as last logged (PowerSummary).
+@property (nonatomic, copy, nullable) NSString *lastPowerSummary;
 
 @end
 
@@ -1269,12 +304,19 @@ static const CGFloat kMessageBarHeight = 80;
     [center addObserver:self selector:@selector(sceneDidActivate:)
                    name:UISceneDidActivateNotification object:nil];
 
+    // Low Power Mode and heat change how fast everything runs: noted when they change.
+    [center addObserver:self selector:@selector(powerStateChanged:)
+                   name:NSProcessInfoPowerStateDidChangeNotification object:nil];
+    [center addObserver:self selector:@selector(powerStateChanged:)
+                   name:NSProcessInfoThermalStateDidChangeNotification object:nil];
+
     self.terminations = [NSMutableArray array];
-    [self logEvent:[NSString stringWithFormat:@"app started (fast loading %@, page size %ld%%, tap fix %@, diagnostics %@)",
+    [self logEvent:[NSString stringWithFormat:@"app started (fast loading %@, page size %ld%%, tap fix %@, diagnostics %@; %@)",
                     SettingBool(kFastLoadKey, YES) ? @"on" : @"off",
                     (long)lround(PageScaleSetting() * 100),
                     SettingBool(kTapFixKey, YES) ? @"on" : @"off",
-                    SettingBool(kDiagnosticsKey, NO) ? @"on" : @"off"]];
+                    SettingBool(kDiagnosticsKey, NO) ? @"on" : @"off",
+                    PowerSummary()]];
 
     //[self showLoadingOverlay];
 
@@ -2001,13 +1043,13 @@ static const CGFloat kMessageBarHeight = 80;
     NSArray *events = [NSUserDefaults.standardUserDefaults arrayForKey:kEventLogKey] ?: @[];
     NSArray *recent = events.count > 60 ? [events subarrayWithRange:NSMakeRange(events.count - 60, 60)] : events;
 
-    return [NSString stringWithFormat:@"iOS %ld.%ld.%ld, app %@, mic permission %@, audio %@, background audio %@, cookie flush %@\n"
+    return [NSString stringWithFormat:@"iOS %ld.%ld.%ld, app %@, mic permission %@, audio %@, background audio %@, cookie flush %@, %@\n"
             "storage on disk (folders of 0.5 MB or more):\n%@\n"
             "app events (latest last):\n%@\n----",
             (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion,
             appVersion ?: @"?", micPermission, [self audioRouteSummary],
             [[NSBundle.mainBundle objectForInfoDictionaryKey:@"UIBackgroundModes"] containsObject:@"audio"] ? @"yes" : @"no",
-            canFlush ? @"available" : @"not available",
+            canFlush ? @"available" : @"not available", PowerSummary(),
             [self storageSummary],
             recent.count ? [recent componentsJoinedByString:@"\n"] : @"(none)"];
 }
@@ -2116,23 +1158,28 @@ static const CGFloat kMessageBarHeight = 80;
 /// when the log is copied. Same content as the copied log: no message text.
 - (void)saveDebugLogFileThen:(void (^)(void))done {
     [self debugLogText:^(NSString *text) {
-        NSURL *documents = [[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
-                                                                 inDomains:NSUserDomainMask] firstObject];
-        [NSFileManager.defaultManager createDirectoryAtURL:documents withIntermediateDirectories:YES attributes:nil error:nil];
-        NSURL *file = [documents URLByAppendingPathComponent:@"debug-log.txt"];
-        NSString *stamped = [NSString stringWithFormat:@"saved %@\n%@", [NSDate date], text];
-        [stamped writeToURL:file atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        [file setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+        [ViewController writeDebugLogFile:text];
         if (done) {
             done();
         }
     }];
 }
 
++ (void)writeDebugLogFile:(NSString *)text {
+    NSURL *documents = [[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
+                                                             inDomains:NSUserDomainMask] firstObject];
+    [NSFileManager.defaultManager createDirectoryAtURL:documents withIntermediateDirectories:YES attributes:nil error:nil];
+    NSURL *file = [documents URLByAppendingPathComponent:@"debug-log.txt"];
+    NSString *stamped = [NSString stringWithFormat:@"saved %@\n%@", [NSDate date], text];
+    [stamped writeToURL:file atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [file setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+}
+
 - (void)copyDebugLog {
     __weak typeof(self) weakSelf = self;
-    [self saveDebugLogFileThen:nil];
+    // One reading of the page's log, for the file and the clipboard.
     [self debugLogText:^(NSString *text) {
+        [ViewController writeDebugLogFile:text];
         UIPasteboard.generalPasteboard.string = text;
 
         typeof(self) strongSelf = weakSelf;
@@ -2431,6 +1478,18 @@ static const CGFloat kMessageBarHeight = 80;
             task = UIBackgroundTaskInvalid;
         }
     }];
+}
+
+/// Low Power Mode switched, or the phone warmed up or cooled down (posted on any thread).
+- (void)powerStateChanged:(NSNotification *)notification {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *summary = PowerSummary();
+        if ([summary isEqualToString:self.lastPowerSummary]) {
+            return;
+        }
+        self.lastPowerSummary = summary;
+        [self logEvent:[@"now " stringByAppendingString:summary]];
+    });
 }
 
 - (void)sceneWillEnterForeground:(NSNotification *)notification {
@@ -3099,7 +2158,12 @@ static const CGFloat kMessageBarHeight = 80;
     if ([message.name isEqualToString:@"appEvent"]) {
         if ([message.body isKindOfClass:NSString.class]) {
             NSString *text = message.body;
-            [self logEvent:[@"page: " stringByAppendingString:[text substringToIndex:MIN(text.length, (NSUInteger)400)]]];
+            NSString *line = [@"page: " stringByAppendingString:[text substringToIndex:MIN(text.length, (NSUInteger)400)]];
+            if ([text hasPrefix:@"launch:"]) {
+                // How fast the phone could run during this launch.
+                line = [line stringByAppendingFormat:@" [%@]", PowerSummary()];
+            }
+            [self logEvent:line];
             if ([text hasPrefix:@"signed out"] || [text hasPrefix:@"api 401"] || [text hasPrefix:@"api 403"]) {
                 [self logSessionCookieState:@"at that moment"];
             }
@@ -3203,9 +2267,11 @@ static const CGFloat kMessageBarHeight = 80;
 
     // Modules run inside the page (fast loading) never pass through
     // -userContentController:didReceiveScriptMessage:, so they are counted here.
+    // One message stands for "count" modules (patch.js sends at most four a second).
     if ([stage isEqualToString:@"module"]) {
         [self noteActivity];
-        self.modulesDone += 1;
+        id count = body[@"count"];
+        self.modulesDone += [count isKindOfClass:NSNumber.class] ? MAX([count integerValue], (NSInteger)1) : 1;
         if ([self isLoadingOverlayVisible]) {
             [self noteSiteBuildFromFile:file];
             [self.loadingOverlay setStage:[self moduleStageText] detail:file];
