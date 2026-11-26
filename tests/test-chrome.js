@@ -28,6 +28,12 @@ function page(html, url) {
     const [x, y, wd, h] = r.split(",").map(Number);
     return { left: x, top: y, width: wd, height: h, right: x + wd, bottom: y + h };
   };
+  // A socket that never connects (jsdom's would try the network).
+  w.WebSocket = class extends w.EventTarget {
+    constructor(url) { super(); this.url = String(url); this.readyState = 0; }
+    close() {}
+    send() {}
+  };
   w.eval(src);
   return { w, posted, clicks, chatLists };
 }
@@ -306,6 +312,25 @@ const SIDEBAR = '<nav><a href="/new">New</a><a href="/artifacts">Artifacts</a></
   pmd.querySelector('input[type="file"]').addEventListener("click", (e) => { fileClicked = true; e.preventDefault(); });
   assert.strictEqual(pm.w.__appChrome.run("pickFiles"), "ok");
   assert.ok(fileClicked, "claude.ai's file field pressed");
+
+  // Voice mode started on a new chat: claude.ai moves to the chat's address while the
+  // call is still connected; the app keeps claude.ai's voice screen showing.
+  const vc = page(HEADER + SIDEBAR + COMPOSER);
+  await new Promise((res) => setTimeout(res, 50));
+  const vcd = vc.w.document;
+  const vb = vcd.querySelector('[aria-label="Use voice mode"]');
+  vb.addEventListener("click", () => vb.setAttribute("aria-label", "End voice mode"));
+  const call = new vc.w.WebSocket("wss://claude.ai/api/ws/voice/organizations/x/chat_conversations/y");
+  assert.strictEqual(vc.w.__appChrome.run("voice"), "ok");
+  await new Promise((res) => setTimeout(res, 200));
+  vc.w.history.pushState({}, "", "/chat/4407ad06-cdee-427d-ae9c-fb9a4db6c0d9");
+  vb.setAttribute("aria-label", "Use voice mode"); // its button may come back, the call is still on
+  await new Promise((res) => setTimeout(res, 1300));
+  assert.strictEqual(vc.posted[vc.posted.length - 1].composerShown, true, "voice screen kept after the address change");
+  call.readyState = 3;
+  call.dispatchEvent(new vc.w.Event("close"));
+  await new Promise((res) => setTimeout(res, 2500)); // idle 0.6 s, checked once a second
+  assert.strictEqual(vc.posted[vc.posted.length - 1].composerShown, false, "app's bar back once the call has ended");
 
   // The sidebar's sections: small text buttons are headings, links are chats; a
   // row that is a button (32 px) is not a heading.

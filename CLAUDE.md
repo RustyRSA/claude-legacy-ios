@@ -486,6 +486,12 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   `tests/test-voice-patches2.js` transpiles the excerpt first, and with a second argument
   checks a real transpiled module (`build/research/ccc-transpiled.js`, local). Lesson:
   test page-side patches on transpiled output.
+- Installed 26 Nov (`ad18571`). Log 19:50: voice works (socket `input_encoding=linear16`,
+  call ran ~12 s, closed cleanly); dictation and the auto-lock pause work too.
+  Seen in it: voice started on a new chat ended the takeover 8 s in, when claude.ai moved
+  to the chat's address, while the call was still connected (the native bar came back
+  over the voice screen for ~4 s). 22c: the takeover follows the address while a voice
+  connection is open. Test pages in `test-chrome.js` now get a fake WebSocket.
 
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,

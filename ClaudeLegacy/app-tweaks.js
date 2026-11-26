@@ -1673,6 +1673,10 @@
     var empty = !text.replace(/\s/g, "");
     var age = now - takeover.since;
     var settled = idle && !!c.editor && !!c.send && now - takeover.idleSince > 600;
+    // Voice mode on a new chat moves to the chat's own address after the first
+    // exchange (log 26 Nov: 8 s in) while the call goes on: the takeover follows
+    // the address as long as the connection is open, instead of ending.
+    if (location.pathname !== takeover.path && live) takeover.path = location.pathname;
     var over = location.pathname !== takeover.path ||
       (settled && (takeover.busy
         // Dictated words arrive up to a few seconds after dictation stops
