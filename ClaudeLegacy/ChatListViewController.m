@@ -4,6 +4,7 @@
 //
 
 #import "ChatListViewController.h"
+#import "ChatCopy.h"
 #import <CoreText/CoreText.h>
 
 static NSString *const kChatListFile = @"chat-list.plist";
@@ -595,12 +596,54 @@ static NSArray<NSDictionary *> *gGroups = nil;
         NSDictionary *chat = (NSUInteger)indexPath.row < chats.count ? chats[(NSUInteger)indexPath.row] : nil;
         cell.textLabel.text = chat[@"name"];
         double updated = [chat[@"updated"] doubleValue];
+        NSString *detail = @"";
         if (updated > 0) {
             NSDate *date = [NSDate dateWithTimeIntervalSince1970:updated / 1000.0];
-            cell.detailTextLabel.text = [_dates localizedStringForDate:date relativeToDate:[NSDate date]];
+            detail = [_dates localizedStringForDate:date relativeToDate:[NSDate date]];
         }
+        // Chats with a copy on the phone open at once (round 24).
+        if ([self chatIDForPath:chat[@"path"]] != nil) {
+            detail = detail.length ? [detail stringByAppendingString:@" · on this phone"] : @"On this phone";
+        }
+        cell.detailTextLabel.text = detail.length ? detail : nil;
     }
     return cell;
+}
+
+/// The chat's id when the phone has a copy of it, else nil.
+- (NSString *)chatIDForPath:(id)path {
+    if (![path isKindOfClass:NSString.class] || ![(NSString *)path hasPrefix:@"/chat/"]) {
+        return nil;
+    }
+    NSString *chatID = [(NSString *)path substringFromIndex:6];
+    return [ChatCopyStore hasChat:chatID] ? chatID : nil;
+}
+
+/// The copy at once, natively; claude.ai opens the chat behind it, so "Open in
+/// Claude" finds it ready. A copy that cannot be read opens as before.
+- (void)showCopyOf:(NSString *)chatID path:(NSString *)path API_AVAILABLE(ios(15.0)) {
+    void (^open)(NSString *) = self.onOpenPath;
+    __weak typeof(self) weakSelf = self;
+    [ChatCopyStore loadChat:chatID completion:^(NSDictionary *chat) {
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        if (chat == nil) {
+            [strongSelf runAndClose:^{
+                if (open) {
+                    open(path);
+                }
+            }];
+            return;
+        }
+        ChatCopyViewController *viewer = [[ChatCopyViewController alloc] initWithChat:chat];
+        viewer.onOpenURL = strongSelf.onOpenURL;
+        [strongSelf.navigationController pushViewController:viewer animated:YES];
+        if (open) {
+            open(path);
+        }
+    }];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -618,6 +661,13 @@ static NSArray<NSDictionary *> *gGroups = nil;
         }
         NSString *path = chats[(NSUInteger)indexPath.row][@"path"];
         void (^open)(NSString *) = self.onOpenPath;
+        if (@available(iOS 15.0, *)) {
+            NSString *chatID = [self chatIDForPath:path];
+            if (chatID != nil) {
+                [self showCopyOf:chatID path:path];
+                return;
+            }
+        }
         [self runAndClose:^{
             if (open && path) {
                 open(path);

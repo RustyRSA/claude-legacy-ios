@@ -41,6 +41,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, nullable) void (^onShowClaudeMenu)(void);
 /// The app's own menu (reload, page size, advanced, debug log).
 @property (nonatomic, copy, nullable) void (^onShowAppMenu)(void);
+/// A link tapped in a chat copy (ChatCopy.h).
+@property (nonatomic, copy, nullable) void (^onOpenURL)(NSURL *url);
 
 @end
 
