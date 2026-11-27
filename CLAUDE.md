@@ -26,7 +26,7 @@ Injected as `WKUserScript`s at document start, in this order
 
 | Order | Script | Role |
 |---|---|---|
-| 1 | settings (inline) | `window.__appSettings` = `{fastLoad, tapFix, pageScale, diagnostics, nativeChrome}` from the app menu |
+| 1 | settings (inline) | `window.__appSettings` = `{fastLoad, tapFix, pageScale, diagnostics, nativeChrome, chatCopies}` from the app menu |
 | 2 | `app-tweaks.js` | Ours. App feel, page size, tap fix, voice patches, WebSocket address fix, debug log and measurements |
 | 3 | iOS version (inline) | `window.iosVersion` |
 | 4 | custom CSS (document end) | Upstream: hides "Continue with Google" (Google blocks embedded web views) |
@@ -81,6 +81,7 @@ Modules run in one of two ways (`patch.js`):
 | `ClaudeLegacy/ViewController.m` | Native shell: web view, edge colour strips, menu, bridge handlers, crash recovery, session cookies, sign-in links, mic permission, debug log |
 | `ClaudeLegacy/NativeChrome.m` | Native top bar and message bar (`NativeChrome`, rounds 12–21; own file since round 23) |
 | `ClaudeLegacy/ModuleStore.m` | The `moduleStore` reply handler: transpiled modules as files (round 7; own file since round 23) |
+| `ClaudeLegacy/ChatCopy.m` | Chat copies (round 24): `ChatCopyStore` (text of opened chats on the phone) and `ChatCopyViewController` (native read-only viewer) |
 | `ClaudeLegacy/AppShared.h` | `AppBackgroundColor`, `IsTrustedFrame`, `kChromeTopHeightKey`, shared by the three files above |
 | `ClaudeLegacy/app-tweaks.js` | Page-side app behaviour and diagnostics (see header comment) |
 | `ClaudeLegacy/patch.js` | Entry interception, module running, launch manifest |
@@ -552,6 +553,39 @@ without sudo — use it if the phone only accepts Logan's SSH key).
   and wipe), only chats this phone has opened, claude.ai's JSON shape may change
   (viewer then not offered), rich content (artifacts, files, tools) shown plainly.
 
+### Round 24 (27 Nov 2026) — chat copies: native read-only viewer (branch `claude/chat-copies`, on top of round 23)
+- Logan chose "yes, passive": only chats opened on this phone, no requests of the app's own.
+- Page (app-tweaks.js): when claude.ai fetches a chat with its messages
+  (`GET …/chat_conversations/<id>?tree=True&rendering_mode=messages`, shape checked in
+  claude.ai's 26 Nov code: `chat_messages`, `sender`, `content` blocks,
+  `parent_message_uuid`, `current_leaf_message_uuid`, root `00000000-…`), the clone of
+  the response is read 1.5 s later and the branch on screen (from the current leaf back
+  through the parents) goes to the `chatList` handler as `{copy: {id, name, updated,
+  earlier, messages: [{role, text, at}]}}`. Text blocks kept; artifacts, tools and files
+  as `[Artifact: …]`, `[Used web search]`, `[File: …]`; thinking and tool results left
+  out. At most 1.5 M characters per chat (newest kept, `earlier` set), 200 k per message,
+  responses over 8 MB skipped; an unchanged chat is not sent again. A 404 sends `{gone}`.
+  Only with setting `chatCopies` (and native controls). Log: counts only ("chat copy: N
+  messages, K characters"; field names if no messages were found).
+- App (`ChatCopy.m`, added to project.pbxproj, ids `…C008`–`C00A`): `ChatCopyStore`,
+  one binary plist per chat in `Application Support/chat-copies/` (folder not backed up,
+  files `NSDataWritingFileProtectionComplete`: readable only while unlocked), 50 chats
+  (oldest copy goes), deleted with its chat when the chat list drops it (14 days not
+  listed or opened), on `gone`, and all at once when "Chat copies on this phone" is
+  turned off (Advanced). A saved chat is merged into the chat list (so opened chats are
+  listed). Debug log header: "chat copies on (N chats on the phone)".
+- Chat list: rows with a copy say "on this phone"; tapping one pushes
+  `ChatCopyViewController` at once (iOS 15+) and claude.ai opens the chat behind it.
+  Viewer: "You" / "Claude" with times, Markdown via Foundation (inline only: bold,
+  italic, code, links; ``` blocks fixed-width; "#" headings bold), text selectable,
+  links open in the page (claude.ai) or the Safari sheet, Find (iOS 16, magnifying
+  glass), opens at the start of the last message, note on when the copy was made.
+  "Open in Claude" closes the list.
+- Tests: `tests/test-chat-copies.js` (branch walk, marks, caps, fetch path, 404, off,
+  nothing in the log). Not verified on the phone: Find on a read-only text view, the
+  scroll position, Markdown edge cases, writes while locked (fail, retried next open).
+- Next: search inside copies from the chat list search.
+
 ### Round 12 (5 Nov 2026) — native controls, stage 1
 - Goal (Logan): look and feel of the iPhone app (references: `reference/` in this repo folder, local only and excluded from Git,
   App Store + Mobbin screenshots). Use Apple's own iOS 16 controls (UIKit, SF Symbols, New York
@@ -849,7 +883,7 @@ Updated 26 Nov 2026 (round 23). Solved items were removed; see the rounds above.
 | Voice stops when locked / app switched | WebKit mutes capture in the background. Background audio mode is set; no fix found |
 | Artifact / Doc links "browser not supported" | 06 covers the shell only. Next: inject the compatibility layer into `*.frame.claudeusercontent.com` frames (user scripts with `forMainFrameOnly:NO`, host-guarded; evaluate with `evaluateJavaScript:inFrame:` or in-frame nonce; separate, narrower bridge for those frames) |
 | Launch time | Send button ~2.0 s from the store, ~4–9 s on the first launch after a claude.ai update (all modules transpiled again). claude.ai's own code runs ~1.7–3.6 s on the main thread: the floor for this design. Round 23 (not yet on the phone): read-ahead list saved at send button + 1 s, grouped store reads, the app's own page work measured and cut; check the next log's "app's own page work" and "requests for … single modules" lines and the power state |
-| Native read-only chat viewer | Proposed in round 23 (instant look-ups from claude.ai's own chat JSON, stored on the phone). Logan to decide: it stores chat text on the phone |
+| Native read-only chat viewer | Round 24 (branch `claude/chat-copies`, not on the phone yet): passive copies of opened chats, viewer from the chat list. Next: search inside copies |
 | Cover limit 8 s | After a claude.ai update the send button can come after 8 s (9.9 s on 26 Nov): claude.ai's controls then show until it does. Could follow the last launch's time |
 | Landscape | claude.ai may dock its sidebar on a wide page; the app then steps aside (its own UI shows). Not designed for |
 

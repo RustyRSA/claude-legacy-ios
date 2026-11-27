@@ -11,6 +11,7 @@
 #import "PolyfillsLoader.h"
 #import "LoadingOverlayView.h"
 #import "ChatListViewController.h"
+#import "ChatCopy.h"
 #import "NativeChrome.h"
 #import "ModuleStore.h"
 #import "AppShared.h"
@@ -509,10 +510,24 @@ static NSString *PowerSummary(void) {
     list.onShowAppMenu = ^{
         [weakSelf showAppMenu];
     };
+    list.onOpenURL = ^(NSURL *url) {
+        [weakSelf openLinkFromChatCopy:url];
+    };
     UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:list];
     navigation.overrideUserInterfaceStyle = self.nativeChrome.overrideUserInterfaceStyle;
     [[self topPresenter] presentViewController:navigation animated:YES completion:nil];
     return YES;
+}
+
+/// A link tapped in a chat copy: a claude.ai address opens in the page (the
+/// chat list goes), anything else in the in-app Safari sheet on top of it.
+- (void)openLinkFromChatCopy:(NSURL *)url {
+    if ([self isWebURL:url] && [self isClaudeHost:url.host]) {
+        [self dismissViewControllerAnimated:YES completion:nil];
+        [self.webView loadRequest:[NSURLRequest requestWithURL:url]];
+        return;
+    }
+    [self openExternalURL:url];
 }
 
 /// With the page ready, claude.ai itself goes there (no reload); while it still
@@ -722,6 +737,7 @@ static NSString *PowerSummary(void) {
         @"diagnostics": @(SettingBool(kDiagnosticsKey, NO)),
         // A BOOL, so it reaches the page as true/false (an int would arrive as 1).
         @"nativeChrome": @((BOOL)(self.nativeChrome != nil && SettingBool(kNativeChromeKey, YES))),
+        @"chatCopies": @((BOOL)[ChatCopyStore enabled]),
     };
     NSData *json = [NSJSONSerialization dataWithJSONObject:settings options:0 error:nil];
     if (json == nil) {
@@ -1018,6 +1034,17 @@ static NSString *PowerSummary(void) {
         [weakSelf logEvent:[NSString stringWithFormat:@"diagnostics turned %@", diagnostics ? @"off" : @"on"]];
         [weakSelf applySettingAndReload];
     }]];
+    if (self.nativeChrome != nil) {
+        BOOL copies = [ChatCopyStore enabled];
+        [sheet addAction:[UIAlertAction actionWithTitle:copies ? @"Chat copies on this phone: on (turn off)" : @"Chat copies on this phone: off (turn on)"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            // Off deletes every copy at once.
+            [ChatCopyStore setEnabled:!copies];
+            [weakSelf logEvent:[NSString stringWithFormat:@"chat copies turned %@", copies ? @"off (copies deleted)" : @"on"]];
+            [weakSelf applySettingAndReload];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Clear event log"
                                               style:UIAlertActionStyleDestructive
                                             handler:^(UIAlertAction *action) {
@@ -1043,13 +1070,13 @@ static NSString *PowerSummary(void) {
     NSArray *events = [NSUserDefaults.standardUserDefaults arrayForKey:kEventLogKey] ?: @[];
     NSArray *recent = events.count > 60 ? [events subarrayWithRange:NSMakeRange(events.count - 60, 60)] : events;
 
-    return [NSString stringWithFormat:@"iOS %ld.%ld.%ld, app %@, mic permission %@, audio %@, background audio %@, cookie flush %@, %@\n"
+    return [NSString stringWithFormat:@"iOS %ld.%ld.%ld, app %@, mic permission %@, audio %@, background audio %@, cookie flush %@, %@, %@\n"
             "storage on disk (folders of 0.5 MB or more):\n%@\n"
             "app events (latest last):\n%@\n----",
             (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion,
             appVersion ?: @"?", micPermission, [self audioRouteSummary],
             [[NSBundle.mainBundle objectForInfoDictionaryKey:@"UIBackgroundModes"] containsObject:@"audio"] ? @"yes" : @"no",
-            canFlush ? @"available" : @"not available", PowerSummary(),
+            canFlush ? @"available" : @"not available", PowerSummary(), [ChatCopyStore summary],
             [self storageSummary],
             recent.count ? [recent componentsJoinedByString:@"\n"] : @"(none)"];
 }
@@ -2189,13 +2216,34 @@ static NSString *PowerSummary(void) {
 
     if ([message.name isEqualToString:@"chatList"]) {
         // Ids, names and times of the chats claude.ai listed; names are not logged.
-        id chats = [message.body isKindOfClass:NSDictionary.class] ? message.body[@"chats"] : nil;
+        NSDictionary *body = [message.body isKindOfClass:NSDictionary.class] ? message.body : @{};
+        id chats = body[@"chats"];
         if ([chats isKindOfClass:NSArray.class]) {
             [ChatListStore mergeChats:chats];
         }
-        id groups = [message.body isKindOfClass:NSDictionary.class] ? message.body[@"groups"] : nil;
+        id groups = body[@"groups"];
         if ([groups isKindOfClass:NSArray.class]) {
             [ChatListStore setGroups:groups];
+        }
+        // A chat's messages as claude.ai fetched them (chat copies, round 24);
+        // their text is never logged.
+        id chatCopy = body[@"copy"];
+        if ([chatCopy isKindOfClass:NSDictionary.class] && [ChatCopyStore enabled]) {
+            NSDictionary *copied = chatCopy;
+            [ChatCopyStore saveChat:copied];
+            NSString *name = [copied[@"name"] isKindOfClass:NSString.class] ? copied[@"name"] : @"";
+            if (name.length > 0) {
+                // An opened chat is a known chat too: listed, kept, searchable.
+                [ChatListStore mergeChats:@[@{@"id": copied[@"id"] ?: @"", @"name": name, @"updated": copied[@"updated"] ?: @0}]];
+            }
+        }
+        id gone = body[@"gone"];
+        if ([gone isKindOfClass:NSString.class]) {
+            [ChatCopyStore removeChat:gone]; // claude.ai says the chat is gone
+        }
+        if ([chats isKindOfClass:NSArray.class] || [groups isKindOfClass:NSArray.class] || chatCopy != nil) {
+            // A chat the list dropped (not listed or opened for 14 days) loses its copy.
+            [ChatCopyStore keepOnly:[NSSet setWithArray:[[ChatListStore chats] valueForKey:@"id"]]];
         }
         return;
     }
